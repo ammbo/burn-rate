@@ -96,6 +96,8 @@ button { cursor: pointer; }
 .meter { height: 4px; border-radius: 99px; background: rgba(246, 239, 230, 0.12); overflow: hidden; }
 .meter span { display: block; height: 100%; background: var(--ember); }
 .card.blind { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.card.blind .offer-price { margin: 0; font-size: 40px; }
+.card.blind .pitch { margin: 0; }
 .card.blind .pay { margin-top: auto; width: 100%; }
 .card header h3 span {
   font-family: Outfit, sans-serif;
@@ -365,6 +367,49 @@ th { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: 
 td.num, th.num { text-align: right; font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
 .pos { color: var(--mint); }
 .neg { color: var(--rose); }
+.muted { color: var(--muted); }
+.crumbs { margin: 22px 0 0; font-size: 14px; color: var(--muted); }
+.crumbs a { color: var(--gold); text-decoration: none; }
+.kpis {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 22px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.kpis.wide { margin-top: 18px; }
+.kpis li {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.kpis span { display: block; color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.kpis strong { display: block; margin-top: 4px; font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 500; }
+.kpis em { display: block; margin-top: 2px; font-style: normal; color: var(--muted); font-size: 12px; }
+.table-wrap { overflow-x: auto; }
+.board td a { text-decoration: none; }
+.board td a:hover { text-decoration: underline; }
+.board tbody tr.row-link { cursor: pointer; }
+.board tbody tr.row-link:hover { background: rgba(255, 255, 255, 0.035); }
+.board tr.dead { opacity: 0.6; }
+.board tfoot td { font-weight: 600; border-bottom: 0; border-top: 1px solid var(--line); }
+.outcome {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.outcome[data-outcome="won"] { color: var(--mint); border-color: rgba(182, 242, 196, 0.5); }
+.outcome[data-outcome="lost"] { color: var(--rose); border-color: rgba(255, 141, 122, 0.4); }
+.outcome[data-outcome="open"] { color: var(--gold); border-color: rgba(240, 194, 122, 0.4); }
+.raw { margin-top: 28px; }
+.raw summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.profile h2 { margin: 0 0 8px; }
 .graves { grid-template-columns: repeat(2, 1fr); margin-top: 18px; }
 .grave {
   background: var(--paper);

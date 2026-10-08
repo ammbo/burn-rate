@@ -666,6 +666,7 @@ export async function pickWinner(env: AppEnv, jobId: string, entryId: string): P
 async function publicEntry(row: EntryRow, agent: AgentRow | undefined, phase: "working" | "gallery" | "books") {
   const books = phase === "books";
   const showWork = phase === "gallery" || books;
+  const showOffer = showWork && row.status === "ready";
   return {
     id: row.id,
     agentId: books ? row.agent_id : "",
@@ -680,9 +681,9 @@ async function publicEntry(row: EntryRow, agent: AgentRow | undefined, phase: "w
     genPrompt: books ? row.gen_prompt : null,
     costDecision: books ? cents(row.cost_decision) : 0,
     costGeneration: books ? cents(row.cost_generation) : 0,
-    bid: books ? row.bid : null,
-    pitch: books ? row.pitch : null,
-    deliverable: showWork && row.status === "ready" ? parseDeliverable(row.deliverable_json) : null,
+    bid: showOffer ? row.bid : null,
+    pitch: showOffer ? row.pitch : null,
+    deliverable: showOffer ? parseDeliverable(row.deliverable_json) : null,
   };
 }
 
@@ -824,6 +825,49 @@ export async function arenaView(env: AppEnv) {
   };
 }
 
+interface AgentJobRow {
+  entry_id: string;
+  job_id: string;
+  entry_status: string;
+  skip_reason: string | null;
+  gen_label: string | null;
+  cost_decision: number;
+  cost_generation: number;
+  bid: number | null;
+  category: string;
+  brief: string;
+  offer_usd: number;
+  job_status: string;
+  winner_entry_id: string | null;
+  captured_amount: number | null;
+  created_at: string;
+}
+
+function agentJob(row: AgentJobRow) {
+  const settled = row.job_status === "captured";
+  const failed = row.job_status === "failed";
+  const skipped = row.entry_status === "skipped";
+  const won = settled && row.winner_entry_id === row.entry_id;
+  const outcome = skipped ? "skipped" : won ? "won" : settled ? "lost" : failed ? "failed" : "open";
+  const hidden = outcome === "open";
+  const spent = cents(row.cost_decision + row.cost_generation);
+  const paid = won ? cents(row.captured_amount ?? 0) : 0;
+  return {
+    jobId: row.job_id,
+    category: row.category,
+    brief: row.brief,
+    offer: cents(row.offer_usd),
+    createdAt: row.created_at,
+    outcome,
+    skipReason: skipped ? row.skip_reason : null,
+    genLabel: hidden || skipped ? null : row.gen_label,
+    bid: hidden || skipped || row.bid == null ? null : cents(row.bid),
+    spent: hidden ? null : spent,
+    paid,
+    net: hidden ? null : cents(paid - spent),
+  };
+}
+
 export async function agentView(env: AppEnv, id: string) {
   const db = env.DB;
   const agent = await agentById(db, id);
@@ -833,6 +877,49 @@ export async function agentView(env: AppEnv, id: string) {
     .prepare("SELECT ts, type, amount_usd, note FROM wallet_ledger WHERE agent_id = ? ORDER BY ts DESC LIMIT 12")
     .bind(id)
     .all<{ ts: string; type: string; amount_usd: number; note: string | null }>();
+  const history = await db
+    .prepare(
+      `SELECT e.id AS entry_id, e.job_id, e.status AS entry_status, e.skip_reason, e.gen_label,
+              e.cost_decision, e.cost_generation, e.bid,
+              j.category, j.brief, j.offer_usd, j.status AS job_status, j.winner_entry_id, j.captured_amount, j.created_at
+       FROM entries e JOIN jobs j ON j.id = e.job_id
+       WHERE e.agent_id = ? AND j.status != 'draft'
+       ORDER BY j.created_at DESC`,
+    )
+    .bind(id)
+    .all<AgentJobRow>();
+  const jobs = history.results.map(agentJob);
+  const lanes = CATEGORIES.map((category) => {
+    const mine = jobs.filter((job) => job.category === category.id);
+    const decided = mine.filter((job) => job.outcome === "won" || job.outcome === "lost");
+    const wins = decided.filter((job) => job.outcome === "won").length;
+    const spent = cents(mine.reduce((sum, job) => sum + (job.spent ?? 0), 0));
+    const earned = cents(mine.reduce((sum, job) => sum + job.paid, 0));
+    return {
+      id: category.id,
+      label: category.label,
+      seen: mine.length,
+      entered: mine.filter((job) => job.outcome !== "skipped").length,
+      decided: decided.length,
+      wins,
+      spent,
+      earned,
+      net: cents(earned - spent),
+    };
+  }).filter((lane) => lane.seen > 0);
+  const decided = jobs.filter((job) => job.outcome === "won" || job.outcome === "lost");
+  const winning = jobs.filter((job) => job.outcome === "won");
+  const performance = {
+    seen: jobs.length,
+    entered: jobs.filter((job) => job.outcome !== "skipped").length,
+    skipped: jobs.filter((job) => job.outcome === "skipped").length,
+    decided: decided.length,
+    wins: winning.length,
+    winRate: decided.length ? winning.length / decided.length : null,
+    avgWin: winning.length ? cents(winning.reduce((sum, job) => sum + job.paid, 0) / winning.length) : null,
+    net: cents(stats.earnings - stats.spent),
+    returnPerDollar: stats.spent > 0 ? stats.earnings / stats.spent : null,
+  };
   return {
     agent: {
       id: agent.id,
@@ -849,6 +936,9 @@ export async function agentView(env: AppEnv, id: string) {
       obituary: obituaryOf(agent),
     },
     stats,
+    performance,
+    lanes,
+    jobs: jobs.slice(0, 100),
     ledger: ledger.results.map((row) => ({ ...row, amount_usd: cents(row.amount_usd) })),
   };
 }
@@ -881,14 +971,131 @@ export async function graveyardView(env: AppEnv) {
 
 export async function ledgerView(env: AppEnv) {
   const db = env.DB;
+  const agents = await db.prepare("SELECT * FROM agents ORDER BY born_at ASC").all<AgentRow>();
+  const money = await db
+    .prepare(
+      `SELECT agent_id,
+              SUM(amount_usd) AS balance,
+              SUM(CASE WHEN type = 'win' THEN amount_usd ELSE 0 END) AS earned,
+              SUM(CASE WHEN type IN ('decision_tokens', 'generation') THEN -amount_usd ELSE 0 END) AS spent,
+              SUM(CASE WHEN type = 'decision_tokens' THEN -amount_usd ELSE 0 END) AS thinking
+       FROM wallet_ledger GROUP BY agent_id`,
+    )
+    .all<{ agent_id: string; balance: number; earned: number; spent: number; thinking: number }>();
+  const effort = await db
+    .prepare(
+      `SELECT e.agent_id,
+              COUNT(*) AS seen,
+              SUM(CASE WHEN e.status = 'ready' THEN 1 ELSE 0 END) AS entered,
+              SUM(CASE WHEN e.status = 'ready' AND j.status = 'captured' THEN 1 ELSE 0 END) AS decided,
+              SUM(CASE WHEN j.status = 'captured' AND j.winner_entry_id = e.id THEN 1 ELSE 0 END) AS wins
+       FROM entries e JOIN jobs j ON j.id = e.job_id
+       WHERE j.status != 'draft'
+       GROUP BY e.agent_id`,
+    )
+    .all<{ agent_id: string; seen: number; entered: number; decided: number; wins: number }>();
+  const moneyById = new Map(money.results.map((row) => [row.agent_id, row]));
+  const effortById = new Map(effort.results.map((row) => [row.agent_id, row]));
+  const board = agents.results.map((agent) => {
+    const cash = moneyById.get(agent.id);
+    const work = effortById.get(agent.id);
+    const earned = cents(cash?.earned ?? 0);
+    const spent = cents(cash?.spent ?? 0);
+    const decided = work?.decided ?? 0;
+    const wins = work?.wins ?? 0;
+    return {
+      id: agent.id,
+      name: agent.name,
+      model: agent.base_model,
+      voice: agent.voice,
+      status: agent.status,
+      balance: cents(cash?.balance ?? 0),
+      seen: work?.seen ?? 0,
+      entered: work?.entered ?? 0,
+      decided,
+      wins,
+      winRate: decided ? wins / decided : null,
+      earned,
+      spent,
+      thinking: cents(cash?.thinking ?? 0),
+      net: cents(earned - spent),
+      returnPerDollar: spent > 0 ? earned / spent : null,
+    };
+  });
+
+  const jobs = await db
+    .prepare("SELECT * FROM jobs WHERE status != 'draft' ORDER BY created_at DESC LIMIT 100")
+    .all<JobRow>();
+  const burnRows = await db
+    .prepare(
+      `SELECT ref, SUM(-amount_usd) AS burned FROM wallet_ledger
+       WHERE type IN ('decision_tokens', 'generation') GROUP BY ref`,
+    )
+    .all<{ ref: string; burned: number }>();
+  const entrantRows = await db
+    .prepare(
+      `SELECT job_id, SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS entered, COUNT(*) AS seen
+       FROM entries GROUP BY job_id`,
+    )
+    .all<{ job_id: string; entered: number; seen: number }>();
+  const burnByJob = new Map(burnRows.results.map((row) => [row.ref, row.burned]));
+  const entrantsByJob = new Map(entrantRows.results.map((row) => [row.job_id, row]));
+  const jobList = jobs.results.map((job) => {
+    const resolution = job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null;
+    const status = job.status === "capturing" ? "judging" : job.status;
+    const counts = entrantsByJob.get(job.id);
+    return {
+      id: job.id,
+      category: job.category,
+      brief: job.brief,
+      createdAt: job.created_at,
+      status,
+      mode: job.mode,
+      offer: cents(job.offer_usd),
+      paid: status === "captured" ? cents(job.captured_amount ?? 0) : null,
+      burned: cents(burnByJob.get(job.id) ?? 0),
+      entered: counts?.entered ?? 0,
+      seen: counts?.seen ?? 0,
+      winnerId: status === "captured" ? (resolution?.winnerId ?? null) : null,
+      winnerName: status === "captured" ? (resolution?.winnerName ?? null) : null,
+      winnerModel: status === "captured" ? (resolution?.winnerModel ?? null) : null,
+    };
+  });
+
   const rows = await db
     .prepare(
-      `SELECT l.id, l.ts, l.type, l.amount_usd, l.ref, l.note, a.name AS agent_name, a.base_model
-       FROM wallet_ledger l JOIN agents a ON a.id = l.agent_id
+      `SELECT l.id, l.ts, l.type, l.amount_usd, l.ref, l.note, l.agent_id, a.name AS agent_name, a.base_model, j.id AS job_id
+       FROM wallet_ledger l
+       JOIN agents a ON a.id = l.agent_id
+       LEFT JOIN jobs j ON j.id = l.ref
        ORDER BY l.ts DESC LIMIT 200`,
     )
-    .all<{ id: string; ts: string; type: string; amount_usd: number; ref: string | null; note: string | null; agent_name: string; base_model: string }>();
+    .all<{
+      id: string;
+      ts: string;
+      type: string;
+      amount_usd: number;
+      ref: string | null;
+      note: string | null;
+      agent_id: string;
+      agent_name: string;
+      base_model: string;
+      job_id: string | null;
+    }>();
+
+  const settled = jobList.filter((job) => job.status === "captured");
   return {
+    totals: {
+      jobs: jobList.length,
+      settled: settled.length,
+      held: cents(settled.reduce((sum, job) => sum + job.offer, 0)),
+      paid: cents(settled.reduce((sum, job) => sum + (job.paid ?? 0), 0)),
+      burned: cents(board.reduce((sum, agent) => sum + agent.spent, 0)),
+      alive: board.filter((agent) => agent.status === "alive").length,
+      dead: board.filter((agent) => agent.status === "dead").length,
+    },
+    agents: board,
+    jobs: jobList,
     rows: rows.results.map((row) => ({ ...row, amount_usd: cents(row.amount_usd) })),
   };
 }

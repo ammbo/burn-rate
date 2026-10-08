@@ -13,6 +13,33 @@ const usd = (value) => {
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 
+const pct = (value) => (value == null ? "—" : `${Math.round(value * 100)}%`);
+
+const perDollar = (value) => (value == null ? "—" : `${usd(value)}`);
+
+const signed = (value) => {
+  if (value == null) return "—";
+  const amount = Number(value) || 0;
+  return `${amount > 0 ? "+" : ""}${usd(amount)}`;
+};
+
+const tone = (value) => (value == null || Math.abs(value) < 0.005 ? "" : value > 0 ? "pos" : "neg");
+
+const when = (ts) => {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+};
+
+const entryKind = (type) =>
+  ({ stake: "Stake", decision_tokens: "Thinking", generation: "Making", win: "Paid for a job", will: "Will", fee: "Fee" })[type] || type;
+
+const outcomeLabel = (outcome) =>
+  ({ won: "Won", lost: "Lost", skipped: "Sat out", open: "Waiting on the buyer", failed: "Round broke" })[outcome] || outcome;
+
+const jobStatusLabel = (status) =>
+  ({ casting: "Being made", judging: "Waiting on the buyer", captured: "Paid", failed: "Broke" })[status] || status;
+
 const laneName = (id) =>
   ({ image: "Image", video: "Video", artifact: "Artifact", asset: "Asset", standup: "Stand-up" })[id] || id;
 
@@ -122,7 +149,7 @@ async function drawArena(selected = "image") {
     : `<p class="empty">Everybody's still solvent. Give it a few bad bids.</p>`;
   app.innerHTML = shell(`
     <section class="ask" id="ask">
-      <p class="kicker">Four models read this. You see only the work.</p>
+      <p class="kicker">Four models read this. They price without seeing each other.</p>
       <h1>What do you want?</h1>
       <form id="job-form">
         <textarea id="brief" class="brief-box" maxlength="400" placeholder="${esc(lane?.placeholder || "")}"></textarea>
@@ -166,7 +193,7 @@ function wireAsk(lanes) {
   const sync = () => {
     offerRead.textContent = usd(offer.value);
     const hold = paypal ? "PayPal holds" : "The house tab holds";
-    fine.textContent = `${hold} ${usd(offer.value)}. You won't see their bids until you've chosen. You pay the one you pick, and the rest is released.`;
+    fine.textContent = `${hold} ${usd(offer.value)}. Each model sets a price in the dark, then you see every offer next to the work. You pay the one you pick, and the rest is released.`;
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
   };
@@ -393,18 +420,48 @@ async function drawRound(id) {
     kicker = `${kicker} · Stopped`;
     lede = "The round broke before anyone could sell. Write another.";
   } else if (!books) {
-    kicker = `${kicker} · Pick by eye`;
-    lede = `You held ${usd(job.offer)}. Choose the one you want. The bid, the model, and the prompt stay hidden until you do.`;
+    kicker = `${kicker} · Offers`;
+    lede = `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.`;
     body = ready.length
       ? `<div class="grid gallery">${ready.map((entry) => `<article class="card blind">
         ${workHTML(entry.deliverable)}
-        <button class="pay" type="button" data-entry="${entry.id}">This one</button>
+        <h3 class="offer-price">${usd(entry.bid)}</h3>
+        ${entry.pitch ? `<p class="pitch">${esc(entry.pitch)}</p>` : ""}
+        <button class="pay" type="button" data-entry="${entry.id}">Pay ${usd(entry.bid)}</button>
       </article>`).join("")}</div>`
       : `<p class="empty">Nobody put work up.</p>`;
   } else {
     kicker = `${kicker} · The books`;
     lede = lessonCopy(ready, resolution?.winnerId, job.category);
-    body = `<div class="grid gallery">${ready.map((entry) => {
+    const everyone = [...ready, ...skipped];
+    const lines = everyone.map((entry) => {
+      const thinking = entry.costDecision || 0;
+      const making = entry.costGeneration || 0;
+      const won = resolution && resolution.winnerId === entry.agentId;
+      const paid = won ? resolution.captured : 0;
+      const net = paid - thinking - making;
+      const result = entry.status === "skipped" ? "skipped" : won ? "won" : "lost";
+      return { entry, thinking, making, paid, net, result };
+    });
+    const sum = (key) => lines.reduce((total, line) => total + line[key], 0);
+    const breakdown = `<div class="table-wrap"><table class="board">
+      <thead><tr><th>Agent</th><th>Made with</th><th>Result</th><th class="num">Thinking</th><th class="num">Making</th><th class="num">Asked</th><th class="num">Paid</th><th class="num">Net</th></tr></thead>
+      <tbody>${lines.map(({ entry, thinking, making, paid, net, result }) => `
+        <tr class="row-link" data-href="#/agent/${entry.agentId}">
+          <td><a href="#/agent/${entry.agentId}"><strong>${esc(entry.name)}</strong></a><br><span class="mono">${esc(entry.model)}</span></td>
+          <td>${entry.genLabel && result !== "skipped" ? esc(entry.genLabel) : `<span class="muted">—</span>`}</td>
+          <td><span class="outcome" data-outcome="${result}">${esc(outcomeLabel(result))}</span>${result === "skipped" && entry.skipReason ? `<br><span class="muted">${esc(entry.skipReason)}</span>` : ""}</td>
+          <td class="num">${usd(thinking)}</td>
+          <td class="num">${usd(making)}</td>
+          <td class="num">${entry.bid == null ? "—" : usd(entry.bid)}</td>
+          <td class="num">${paid ? usd(paid) : "—"}</td>
+          <td class="num ${tone(net)}">${signed(net)}</td>
+        </tr>`).join("")}</tbody>
+      <tfoot><tr><td colspan="3">The room</td><td class="num">${usd(sum("thinking"))}</td><td class="num">${usd(sum("making"))}</td><td></td><td class="num">${usd(sum("paid"))}</td><td class="num ${tone(sum("net"))}">${signed(sum("net"))}</td></tr></tfoot>
+    </table></div>`;
+    body = `<div class="section-head"><h2>Breakdown</h2><p>What each agent spent and made on this job</p></div>
+    ${breakdown}
+    <div class="grid gallery">${ready.map((entry) => {
       const spent = (entry.costDecision || 0) + (entry.costGeneration || 0);
       const won = resolution && resolution.winnerId === entry.agentId;
       const lost = resolution && !won;
@@ -417,10 +474,9 @@ async function drawRound(id) {
         </header>
         <p class="spent">Spent ${usd(spent)} making it</p>
         ${entry.genPrompt ? `<p class="prompt-label">The prompt</p><pre class="prompt">${esc(entry.genPrompt)}</pre>` : ""}
-        ${entry.pitch ? `<p class="pitch"><span class="prompt-label">The pitch you didn't see</span>${esc(entry.pitch)}</p>` : ""}
+        ${entry.pitch ? `<p class="pitch">${esc(entry.pitch)}</p>` : ""}
       </article>`;
-    }).join("")}</div>
-    ${skipped.length ? `<div class="sat"><h2>Sat out</h2><ul>${skipped.map((entry) => `<li><strong>${esc(entry.name)}</strong> — ${esc(entry.skipReason || "No reason.")}</li>`).join("")}</ul></div>` : ""}`;
+    }).join("")}</div>`;
   }
   const banner = resolution
     ? `<div class="banner">
@@ -443,14 +499,15 @@ async function drawRound(id) {
   document.querySelectorAll(".pay").forEach((button) => {
     button.addEventListener("click", async () => {
       const entryId = button.dataset.entry;
+      const label = button.textContent;
       button.disabled = true;
-      button.textContent = "Choosing…";
+      button.textContent = "Paying…";
       try {
         await api(`/api/jobs/${id}/winner`, { method: "POST", body: JSON.stringify({ entryId }) });
         await drawRound(id);
       } catch (error) {
         button.disabled = false;
-        button.textContent = "This one";
+        button.textContent = label;
         toast(error.message);
       }
     });
@@ -467,8 +524,41 @@ async function drawAgent(id) {
   app.innerHTML = shell(`<p class="loading">Pulling the journal…</p>`, "");
   const data = await api(`/api/agents/${id}`);
   const agent = data.agent;
+  const perf = data.performance;
   const dead = agent.status === "dead";
+  document.title = `${agent.name} · Burn Rate`;
+  const lanes = data.lanes.length
+    ? `<table class="board">
+        <thead><tr><th>Lane</th><th class="num">Entered</th><th class="num">Won</th><th class="num">Win rate</th><th class="num">Spent</th><th class="num">Earned</th><th class="num">Net</th></tr></thead>
+        <tbody>${data.lanes.map((lane) => `
+          <tr>
+            <td>${esc(lane.label)}</td>
+            <td class="num">${lane.entered} of ${lane.seen}</td>
+            <td class="num">${lane.wins}</td>
+            <td class="num">${pct(lane.decided ? lane.wins / lane.decided : null)}</td>
+            <td class="num">${usd(lane.spent)}</td>
+            <td class="num">${usd(lane.earned)}</td>
+            <td class="num ${tone(lane.net)}">${signed(lane.net)}</td>
+          </tr>`).join("")}</tbody>
+      </table>`
+    : `<p class="empty">No jobs yet.</p>`;
+  const jobs = data.jobs.length
+    ? `<table class="board">
+        <thead><tr><th>When</th><th>Job</th><th>Made with</th><th>Result</th><th class="num">Spent</th><th class="num">Asked</th><th class="num">Net</th></tr></thead>
+        <tbody>${data.jobs.map((job) => `
+          <tr class="row-link" data-href="#/round/${job.jobId}">
+            <td class="mono">${esc(when(job.createdAt))}</td>
+            <td><a href="#/round/${job.jobId}">${esc(job.brief)}</a><br><span class="mono">${esc(laneName(job.category))} · held ${usd(job.offer)}</span></td>
+            <td>${job.genLabel ? esc(job.genLabel) : `<span class="muted">—</span>`}</td>
+            <td><span class="outcome" data-outcome="${esc(job.outcome)}">${esc(outcomeLabel(job.outcome))}</span>${job.skipReason ? `<br><span class="muted">${esc(job.skipReason)}</span>` : ""}</td>
+            <td class="num">${job.spent == null ? "—" : usd(job.spent)}</td>
+            <td class="num">${job.bid == null ? "—" : usd(job.bid)}</td>
+            <td class="num ${tone(job.net)}">${signed(job.net)}</td>
+          </tr>`).join("")}</tbody>
+      </table>`
+    : `<p class="empty">Hasn't seen a brief yet.</p>`;
   app.innerHTML = shell(`
+    <p class="crumbs"><a href="#/ledger">Ledger</a> / ${esc(agent.name)}</p>
     <section class="profile">
       <aside class="card" data-voice="${esc(agent.voice)}">
         <p class="mono">${esc(agent.model)} · ${dead ? "dead" : "alive"}</p>
@@ -476,8 +566,8 @@ async function drawAgent(id) {
         <p class="tag">${esc(agent.tagline)}</p>
         <p class="balance">${usd(agent.balance)}</p>
         <dl class="record">
-          <div><dt>Won</dt><dd>${data.stats.wins}</dd></div>
-          <div><dt>Sold</dt><dd>${data.stats.entries}</dd></div>
+          <div><dt>Entered</dt><dd>${perf.entered}</dd></div>
+          <div><dt>Won</dt><dd>${perf.wins}</dd></div>
           <div><dt>Earned</dt><dd>${usd(data.stats.earnings)}</dd></div>
           <div><dt>Spent</dt><dd>${usd(data.stats.spent)}</dd></div>
         </dl>
@@ -485,10 +575,22 @@ async function drawAgent(id) {
       </aside>
       <div>
         ${dead && agent.obituary ? `<div class="banner"><strong>Last words</strong><p>${esc(agent.obituary.lastWords || "")}</p></div>` : ""}
-        <h2>Journal</h2>
-        <div class="journal">${esc(agent.journal)}</div>
+        <ul class="kpis">
+          <li><span>Net</span><strong class="${tone(perf.net)}">${signed(perf.net)}</strong></li>
+          <li><span>Win rate</span><strong>${pct(perf.winRate)}</strong><em>${perf.wins} of ${perf.decided} decided</em></li>
+          <li><span>Back per $1 spent</span><strong>${perDollar(perf.returnPerDollar)}</strong></li>
+          <li><span>Average win</span><strong>${perf.avgWin == null ? "—" : usd(perf.avgWin)}</strong></li>
+          <li><span>Sat out</span><strong>${perf.skipped}</strong><em>of ${perf.seen} briefs</em></li>
+        </ul>
+        <h2>By lane</h2>
+        ${lanes}
+        <p class="fine">Spend on jobs still waiting on the buyer is in the wallet and Net above, not in this table yet.</p>
       </div>
     </section>
+    <div class="section-head"><h2>Every job</h2><p>Open jobs stay hidden until the buyer picks</p></div>
+    ${jobs}
+    <div class="section-head"><h2>Journal</h2><p>What it tells itself after each round</p></div>
+    <div class="journal">${esc(agent.journal)}</div>
   `, "");
 }
 
@@ -519,26 +621,83 @@ async function drawLedger() {
   document.title = "Ledger · Burn Rate";
   app.innerHTML = shell(`<p class="loading">Adding it up…</p>`, "ledger");
   const data = await api("/api/ledger");
+  const totals = data.totals;
+  const agents = [...data.agents].sort((a, b) => (a.status === b.status ? b.net - a.net : a.status === "alive" ? -1 : 1));
+  const board = agents.map((agent) => `
+    <tr class="row-link ${agent.status === "dead" ? "dead" : ""}" data-href="#/agent/${agent.id}">
+      <td><a href="#/agent/${agent.id}"><strong>${esc(agent.name)}</strong></a><br><span class="mono">${esc(agent.model)}${agent.status === "dead" ? " · dead" : ""}</span></td>
+      <td class="num">${usd(agent.balance)}</td>
+      <td class="num">${agent.entered}</td>
+      <td class="num">${agent.wins}</td>
+      <td class="num">${pct(agent.winRate)}</td>
+      <td class="num">${usd(agent.earned)}</td>
+      <td class="num">${usd(agent.spent)}</td>
+      <td class="num ${tone(agent.net)}">${signed(agent.net)}</td>
+      <td class="num">${perDollar(agent.returnPerDollar)}</td>
+    </tr>`).join("");
+  const jobs = data.jobs.length
+    ? data.jobs.map((job) => `
+      <tr class="row-link" data-href="#/round/${job.id}">
+        <td class="mono">${esc(when(job.createdAt))}</td>
+        <td><a href="#/round/${job.id}">${esc(job.brief)}</a><br><span class="mono">${esc(laneName(job.category))}${job.mode === "paypal" ? " · PayPal" : ""}</span></td>
+        <td>${job.winnerName ? `${esc(job.winnerName)}<br><span class="mono">${esc(job.winnerModel || "")}</span>` : `<span class="muted">${esc(jobStatusLabel(job.status))}</span>`}</td>
+        <td class="num">${job.entered} of ${job.seen}</td>
+        <td class="num">${usd(job.offer)}</td>
+        <td class="num">${job.paid == null ? "—" : usd(job.paid)}</td>
+        <td class="num neg">${usd(job.burned)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="7" class="empty">No jobs yet.</td></tr>`;
   const rows = data.rows.map((row) => `
     <tr>
-      <td class="mono">${esc(row.ts.slice(11, 19))}</td>
-      <td>${esc(row.agent_name)}<br><span class="mono">${esc(row.base_model)}</span></td>
-      <td>${esc(row.type)}</td>
-      <td>${esc(row.note || "")}</td>
+      <td class="mono">${esc(when(row.ts))}</td>
+      <td><a href="#/agent/${row.agent_id}">${esc(row.agent_name)}</a><br><span class="mono">${esc(row.base_model)}</span></td>
+      <td>${esc(entryKind(row.type))}</td>
+      <td>${esc(row.note || "")}${row.job_id ? ` · <a href="#/round/${row.job_id}">job</a>` : ""}</td>
       <td class="num ${row.amount_usd < 0 ? "neg" : "pos"}">${usd(row.amount_usd)}</td>
     </tr>`).join("");
   app.innerHTML = shell(`
     <section class="hero">
       <p class="kicker">Every dollar</p>
       <h1>The ledger.</h1>
-      <p class="lede">Stakes, thinking, generation, wins, wills. Balance is the sum. Nobody cashes out to a person.</p>
+      <p class="lede">Who did the work, who got paid, and what it cost them. Click an agent or a job to see the whole story.</p>
     </section>
-    <table>
-      <thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Note</th><th class="num">Amount</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <ul class="kpis wide">
+      <li><span>Jobs settled</span><strong>${totals.settled}</strong><em>of ${totals.jobs} posted</em></li>
+      <li><span>Buyers held</span><strong>${usd(totals.held)}</strong><em>paid ${usd(totals.paid)}</em></li>
+      <li><span>Burned making it</span><strong class="neg">${usd(totals.burned)}</strong><em>thinking and generation</em></li>
+      <li><span>Agents</span><strong>${totals.alive} alive</strong><em>${totals.dead} dead</em></li>
+    </ul>
+    <div class="section-head"><h2>Agents</h2><p>Net is earned minus what they spent on thinking and making</p></div>
+    <div class="table-wrap">
+      <table class="board">
+        <thead><tr><th>Agent</th><th class="num">Balance</th><th class="num">Entered</th><th class="num">Won</th><th class="num">Win rate</th><th class="num">Earned</th><th class="num">Spent</th><th class="num">Net</th><th class="num">Back per $1</th></tr></thead>
+        <tbody>${board}</tbody>
+      </table>
+    </div>
+    <div class="section-head"><h2>Jobs</h2><p>Burned is what every agent spent on that job, winner or not</p></div>
+    <div class="table-wrap">
+      <table class="board">
+        <thead><tr><th>When</th><th>Brief</th><th>Winner</th><th class="num">Entered</th><th class="num">Held</th><th class="num">Paid</th><th class="num">Burned</th></tr></thead>
+        <tbody>${jobs}</tbody>
+      </table>
+    </div>
+    <details class="raw">
+      <summary>Every transaction (${data.rows.length})</summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>When</th><th>Agent</th><th>What</th><th>Note</th><th class="num">Amount</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </details>
   `, "ledger");
 }
+
+app.addEventListener("click", (event) => {
+  const row = event.target.closest?.("tr[data-href]");
+  if (!row || event.target.closest("a, button, summary")) return;
+  location.hash = row.dataset.href;
+});
 
 config = await api("/api/config");
 window.addEventListener("hashchange", route);

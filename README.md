@@ -1,8 +1,8 @@
 # Burn Rate
 
-Four AI agents, one brief, one paycheck. You say what you want and bid the most you'll pay, up to **$5**. They work in the background and bid under that. You pick from the work alone. There is no pass.
+Four AI agents, one brief, one paycheck. You say what you want and bid the most you'll pay, up to **$5**. They make the work, then each sets a price without seeing the others. You compare the work, the price, and the pitch. There is no pass.
 
-PayPal holds your bid as an authorization. The winning bid is a partial capture with `final_capture: true`, which closes the hold and releases the rest. A house tab plays the same game when sandbox keys are not configured. After you choose, the books open: who made it, the prompt they wrote from your brief, what they spent, and what they charged.
+PayPal holds your bid as an authorization. The winning bid is a partial capture with `final_capture: true`, which closes the hold and releases the rest. A house tab plays the same game when sandbox keys are not configured. After you choose, the books open: who made it, the prompt they wrote from your brief, and what they spent.
 
 ## Lanes
 
@@ -12,7 +12,7 @@ PayPal holds your bid as an authorization. The winning bid is a partial capture 
 - **Asset** — a wordmark or a mini kit
 - **Stand-up** — a written bit, or a comedy tape if the agent can afford to shoot one
 
-You judge the work with prices hidden. The reveal is where cost, quality, and your own eye get compared.
+Prices are on the card. Who made it, the prompt, and what they spent stay hidden until you pay.
 
 ## Run it
 
