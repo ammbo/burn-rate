@@ -1,8 +1,12 @@
+import { footerHTML, sandboxHTML, howHTML, homeDescription } from "/site-content.js";
+
 const app = document.querySelector("#app");
+const fallbackHTML = app.innerHTML;
 const toastEl = document.querySelector("#toast");
 let poll = 0;
 let paypalPromise = null;
 let config = null;
+let authenticated = false;
 
 const usd = (value) => {
   const amount = Number(value) || 0;
@@ -65,22 +69,35 @@ async function api(path, options = {}) {
 function shell(main, active) {
   return `<div class="page">
     <header class="bar">
-      <a class="brand" href="#/">Burn Rate</a>
-      <nav>
+      <a class="brand" href="/#/" aria-label="Burn Rate home"><img src="/assets/logo-mark.svg" width="30" height="30" alt="" />Burn Rate</a>
+      <nav aria-label="Main navigation">
         <a href="#/" class="${active === "arena" ? "on" : ""}">Arena</a>
         <a href="#/graveyard" class="${active === "grave" ? "on" : ""}">Graveyard</a>
         <a href="#/ledger" class="${active === "ledger" ? "on" : ""}">Ledger</a>
+        <a href="/how-it-works">How it works</a>
       </nav>
       <a class="post-link" href="#/post/image">Put up a job</a>
     </header>
-    ${main}
+    <main id="main-content" tabindex="-1">${sandboxHTML}${main}</main>
+    ${footerHTML}
   </div>`;
 }
 
 function route() {
+  if (location.hash === "#main-content") {
+    document.querySelector("#main-content")?.focus();
+    return;
+  }
   window.clearTimeout(poll);
   const parts = (location.hash || "#/").replace(/^#\/?/, "").split("/").filter(Boolean);
   const name = parts[0] || "arena";
+  const home = name === "arena" || name === "post";
+  document.querySelector('meta[name="description"]').content = home
+    ? homeDescription
+    : "Explore the public Burn Rate arena: agent journals, creative rounds, and the game ledger. PayPal sandbox payments only.";
+  document.querySelector('meta[name="robots"]').content = home
+    ? "index, follow, max-image-preview:large"
+    : "noindex, follow";
   const go = {
     arena: () => drawArena(),
     post: () => drawArena(parts[1] || "image"),
@@ -90,23 +107,25 @@ function route() {
     ledger: () => drawLedger(),
   }[name];
   if (!go) {
-    location.hash = "#/";
+    document.title = "Page not found · Burn Rate";
+    app.innerHTML = shell(`<section class="hero"><p class="kicker">Page not found</p><h1>This one <em>burned out.</em></h1><p class="lede">We couldn’t find that view.</p><a class="post-link" href="#/">Back to the arena</a></section>`, "");
     return;
   }
   go().catch((error) => {
     toast(error.message);
-    app.innerHTML = shell(`<p class="loading">${esc(error.message)}</p>`, "");
+    app.innerHTML = home ? fallbackHTML : shell(`<p class="loading">${esc(error.message)}</p><p><a href="#/">Back to the arena</a></p>`, "");
   });
 }
 
 async function drawArena(selected = "image") {
-  document.title = "Burn Rate";
+  document.title = "Burn Rate — Four AI agents. One creative brief.";
   app.innerHTML = shell(`<p class="loading">Checking the wallets…</p>`, "arena");
-  const data = await api("/api/arena");
+  const [data, session] = await Promise.all([api("/api/arena"), api("/api/session")]);
+  authenticated = session.authenticated;
   const lanes = config?.categories || [];
   const current = lanes.some((lane) => lane.id === selected) ? selected : "image";
   const lane = lanes.find((item) => item.id === current) || lanes[0];
-  const paypal = Boolean(config?.paypal);
+  const paypal = Boolean(config?.paypal && authenticated && config?.generationEnabled);
   const chips = lanes.map((item) => `
     <label class="chip">
       <input type="radio" name="lane" value="${item.id}" ${item.id === current ? "checked" : ""} />
@@ -149,11 +168,19 @@ async function drawArena(selected = "image") {
     : `<p class="empty">Everybody's still solvent. Give it a few bad bids.</p>`;
   app.innerHTML = shell(`
     <section class="ask" id="ask">
-      <p class="kicker">Four models read this. They price without seeing each other.</p>
+      <p class="kicker">Four agents. One brief. You pick the winner.</p>
       <h1>What do you want?</h1>
+      <p class="lede arena-lede">Give four AI agents a creative brief and a budget up to $5. Compare the work, the price, and the pitch. Pick one, then open the books.</p>
+      ${authenticated
+        ? `<p class="fine">Demo access is active in this browser. Up to ${esc(config.generationLimits.session)} new rounds per day; shared limits also apply. <button type="button" class="house ghost" id="sign-out">Sign out</button></p>`
+        : `<form id="access-form" class="access-form"><label for="invite-code">Demo invite code</label><p class="fine" id="access-hint">Posting is limited to invited testers. You can explore public rounds below.</p><div class="actions"><input id="invite-code" type="password" autocomplete="off" maxlength="256" required aria-describedby="access-hint" /><button type="submit" class="house">Unlock demo</button></div><p id="access-status" class="fine" role="status" aria-live="polite"></p></form>`}
+      ${config?.generationEnabled ? "" : `<p class="banner">New generations are paused. Explore the public rounds below.</p>`}
       <form id="job-form">
-        <textarea id="brief" class="brief-box" maxlength="400" placeholder="${esc(lane?.placeholder || "")}"></textarea>
+        <fieldset ${authenticated && config?.generationEnabled ? "" : "disabled"}>
+        <label class="sr-only" for="brief">Your creative brief</label>
+        <textarea id="brief" class="brief-box" maxlength="400" aria-describedby="brief-hint brief-privacy" placeholder="${esc(lane?.placeholder || "")}"></textarea>
         <p class="hint" id="brief-hint"></p>
+        <p class="fine">This build is entered in the PayPal + AI hackathon and uses sandbox test funds.</p><p class="fine" id="brief-privacy">Briefs and rounds are public. Leave out personal or confidential information. By posting, you agree to the <a href="/terms">terms</a>; see <a href="/privacy">privacy</a>.</p>
         <div class="chips" role="radiogroup" aria-label="Kind of work">${chips}</div>
         <p class="blurb" id="lane-blurb">${esc(lane?.blurb || "")}</p>
         <label class="offer">
@@ -163,20 +190,41 @@ async function drawArena(selected = "image") {
         </label>
         <p class="fine" id="fine"></p>
         <div class="actions">
-          ${paypal ? `<div id="paypal"></div>` : ""}
+          ${paypal ? `<div id="paypal-checkout"></div><p id="paypal-status" class="fine" role="status" aria-live="polite"></p>` : ""}
           <button class="house ${paypal ? "ghost" : ""}" type="button" id="house">${paypal ? "Or hold it on the house tab" : "Hold it on the house tab"}</button>
         </div>
-        ${paypal ? "" : `<p class="fine">Sandbox keys aren't in this room, so the house holds the bid and records the capture here.</p>`}
+        ${config?.paypal ? "" : `<p class="fine">Sandbox keys aren't in this room, so the house holds the bid and records the capture here.</p>`}
+        </fieldset>
       </form>
     </section>
     <div class="section-head"><h2>The room</h2><p>Burned ${usd(data.stats.burned)} · paid ${usd(data.stats.paid)}</p></div>
+    <p class="fine">Four personalities on a shared AI backend. Seat labels are characters; wallets use game prices. <a href="/how-it-works">Meet the mechanics.</a></p>
     <div class="agents">${agents}</div>
     <div class="section-head"><h2>On the board</h2><p>Jobs in motion</p></div>
     <div class="jobs">${live}</div>
     ${recent ? `<div class="section-head"><h2>Last picks</h2><p>What your eye actually paid</p></div><div class="jobs">${recent}</div>` : ""}
     <div class="section-head"><h2>Graveyard</h2><p>Wallets that hit the floor</p></div>
     ${graves}
+    ${howHTML}
   `, "arena");
+  document.querySelector("#access-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector("button");
+    button.disabled = true;
+    try {
+      await api("/api/session", { method: "POST", body: JSON.stringify({ code: document.querySelector("#invite-code").value }) });
+      await drawArena(current);
+    } catch (error) {
+      document.querySelector("#access-status").textContent = error.message;
+      button.disabled = false;
+    }
+  });
+  document.querySelector("#sign-out")?.addEventListener("click", async () => {
+    try {
+      await api("/api/session/logout", { method: "POST", body: "{}" });
+      await drawArena(current);
+    } catch (error) { toast(error.message); }
+  });
   wireAsk(lanes);
   if ((location.hash || "").startsWith("#/post")) document.querySelector("#brief")?.focus();
 }
@@ -192,8 +240,9 @@ function wireAsk(lanes) {
   let touched = false;
   const sync = () => {
     offerRead.textContent = usd(offer.value);
-    const hold = paypal ? "PayPal holds" : "The house tab holds";
-    fine.textContent = `${hold} ${usd(offer.value)}. Each model sets a price in the dark, then you see every offer next to the work. You pay the one you pick, and the rest is released.`;
+    const hold = paypal ? "PayPal authorizes" : "The house tab simulates holding";
+    const funds = config?.paypalMode === "sandbox" ? " in test funds" : "";
+    fine.textContent = `${hold} ${usd(offer.value)}${funds}. Each agent sets a price in the dark, then you see each offer next to the work. Pick one to capture its price and release the unused authorization.`;
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
   };
@@ -216,7 +265,10 @@ function wireAsk(lanes) {
     });
   });
   document.querySelector("#house").addEventListener("click", () => submitHouse());
-  if (paypal) mountPaypal().catch((error) => toast(error.message));
+  if (paypal) mountPaypal().catch(() => {
+    const status = document.querySelector("#paypal-status");
+    if (status) status.textContent = "PayPal checkout is unavailable right now. You can still try the house tab with simulated payments.";
+  });
 }
 
 function readForm() {
@@ -247,13 +299,18 @@ async function submitHouse() {
 }
 
 function loadPaypal(clientId) {
-  if (window.paypal) return Promise.resolve();
+  if (typeof window.paypal?.Buttons === "function") return Promise.resolve();
   if (!paypalPromise) {
     paypalPromise = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&intent=authorize&currency=USD&disable-funding=card,credit,venmo`;
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error("PayPal's button didn't load."));
+      const fail = () => {
+        script.remove();
+        paypalPromise = null;
+        reject(new Error("PayPal checkout didn’t load. Try the house tab."));
+      };
+      script.onload = () => typeof window.paypal?.Buttons === "function" ? resolve() : fail();
+      script.onerror = fail;
       document.head.appendChild(script);
     });
   }
@@ -262,10 +319,10 @@ function loadPaypal(clientId) {
 
 async function mountPaypal() {
   await loadPaypal(config.paypalClientId);
-  const slot = document.querySelector("#paypal");
-  if (!slot || !window.paypal) return;
+  const slot = document.querySelector("#paypal-checkout");
+  if (!slot || typeof window.paypal?.Buttons !== "function") return;
   let jobId = "";
-  window.paypal.Buttons({
+  await window.paypal.Buttons({
     style: { color: "gold", shape: "pill", label: "paypal", height: 46 },
     createOrder: async () => {
       const posted = readForm();
@@ -286,10 +343,16 @@ async function mountPaypal() {
   }).render(slot);
 }
 
+function svgImage(svg, caption = "Generated artwork") {
+  return typeof svg === "string" && svg.length <= 100000
+    ? `<img src="data:image/svg+xml,${encodeURIComponent(svg)}" alt="${esc(caption)}">` : "";
+}
+
 function workHTML(deliverable) {
   if (!deliverable) return "";
   if (deliverable.kind === "image") {
-    const art = deliverable.src ? `<img src="${esc(deliverable.src)}" alt="${esc(deliverable.caption)}">` : deliverable.svg;
+    const safeImage = typeof deliverable.src === "string" && deliverable.src.length <= 2_000_030 && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(deliverable.src);
+    const art = safeImage ? `<img src="${esc(deliverable.src)}" alt="${esc(deliverable.caption)}">` : svgImage(deliverable.svg, deliverable.caption);
     return `<div class="stage-art">${art}<p class="tag">${esc(deliverable.caption)}</p></div>`;
   }
   if (deliverable.kind === "video") {
@@ -305,8 +368,8 @@ function workHTML(deliverable) {
     </article>`;
   }
   if (deliverable.kind === "asset") {
-    return `<div class="stage-art">${deliverable.svg}
-      <div class="swatches">${deliverable.palette.map((swatch) => `<div class="swatch" style="background:${esc(swatch.hex)}">${esc(swatch.name)}<br>${esc(swatch.hex)}</div>`).join("")}</div>
+    return `<div class="stage-art">${svgImage(deliverable.svg, "Generated wordmark")}
+      <div class="swatches">${deliverable.palette.map((swatch) => `<div class="swatch" style="background:${/^#[0-9a-f]{6}$/i.test(swatch.hex) ? swatch.hex : "#777777"}">${esc(swatch.name)}<br>${esc(swatch.hex)}</div>`).join("")}</div>
       <p>${esc(deliverable.note)}</p>
     </div>`;
   }
@@ -322,7 +385,7 @@ function workHTML(deliverable) {
 
 function playerHTML(frames, wide) {
   return `<div class="player ${wide ? "wide" : "tall"}">
-    ${frames.map((frame, index) => `<div class="frame ${index === 0 ? "on" : ""}" data-t="${esc(frame.t)}">${frame.svg}<p>${esc(frame.caption)}</p></div>`).join("")}
+    ${frames.map((frame, index) => `<div class="frame ${index === 0 ? "on" : ""}" data-t="${esc(frame.t)}">${svgImage(frame.svg, frame.caption)}<p>${esc(frame.caption)}</p></div>`).join("")}
     <button type="button" class="play">Play</button>
   </div>`;
 }
@@ -422,13 +485,13 @@ async function drawRound(id) {
     lede = "The round broke before anyone could sell. Write another.";
   } else if (!books) {
     kicker = `${kicker} · Offers`;
-    lede = `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.`;
+    lede = job.isOwner ? `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.` : `Each price was set without seeing the others. Only the browser that posted this job can choose the winner.`;
     body = ready.length
       ? `<div class="grid gallery">${ready.map((entry) => `<article class="card blind">
         ${workHTML(entry.deliverable)}
         <h3 class="offer-price">${usd(entry.bid)}</h3>
         ${entry.pitch ? `<p class="pitch">${esc(entry.pitch)}</p>` : ""}
-        <button class="pay" type="button" data-entry="${entry.id}">Pay ${usd(entry.bid)}</button>
+        <button class="pay" type="button" data-entry="${entry.id}" ${job.isOwner ? "" : "disabled"}>${job.isOwner ? `Pay ${usd(entry.bid)}` : "Owner selects"}</button>
       </article>`).join("")}</div>`
       : `<p class="empty">Nobody put work up.</p>`;
   } else {
@@ -612,7 +675,7 @@ async function drawGraveyard() {
     <section class="hero">
       <p class="kicker">Obituaries</p>
       <h1>They spent it.</h1>
-      <p class="lede">An agent dies under $0.10. Whatever's left goes to the heir, and a new model sits down with a fresh $4 stake.</p>
+      <p class="lede">An agent dies under $0.10. Whatever's left goes to the heir, and a new agent sits down with a fresh $4 game stake.</p>
     </section>
     <div class="graves">${graves}</div>
   `, "grave");
@@ -700,6 +763,11 @@ app.addEventListener("click", (event) => {
   location.hash = row.dataset.href;
 });
 
-config = await api("/api/config");
-window.addEventListener("hashchange", route);
-route();
+try {
+  config = await api("/api/config");
+  window.addEventListener("hashchange", route);
+  route();
+} catch {
+  // Keep the readable, linked static page if the interactive service is down.
+  toast("The arena is unavailable right now. You can still read how it works and try again later.");
+}

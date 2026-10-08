@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 64" fill="none">
+  <title>Burn Rate</title>
+  <path d="M8 53V37C8 24 23 18 32 5c9 13 24 19 24 32v16L32 20 8 53Z" fill="#ff4d1c"/>
+  <circle cx="32" cy="42" r="5.5" fill="#f0c27a"/>
+  <text x="76" y="47" fill="#f6efe6" font-family="Georgia, serif" font-weight="bold" font-size="46" letter-spacing="-2">Burn Rate</text>
+</svg>

@@ -19,9 +19,10 @@ import {
   type Voice,
 } from "./catalog";
 import { GameError } from "./errors";
+import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, generationEnabled, generationLimits, type AccessEnv } from "./access";
 import { decide, make, paint, type Persona } from "./ai";
 import { fromWork, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
-import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, type PaypalEnv } from "./paypal";
+import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, paypalMode, type PaypalEnv } from "./paypal";
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS agents (
@@ -88,6 +89,7 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS ledger_agent ON wallet_ledger(agent_id)`,
   `CREATE INDEX IF NOT EXISTS entries_job ON entries(job_id)`,
+  ...ACCESS_SCHEMA,
 ];
 
 interface AgentRow {
@@ -119,6 +121,7 @@ interface JobRow {
   captured_amount: number | null;
   resolution_json: string | null;
   created_at: string;
+  owner_session_id: string | null;
 }
 
 interface EntryRow {
@@ -139,12 +142,7 @@ interface EntryRow {
   created_at: string;
 }
 
-export interface AppEnv extends PaypalEnv {
-  DB: D1Database;
-  AI: Ai;
-}
-
-let ready: Promise<void> | null = null;
+export type AppEnv = Env & PaypalEnv & AccessEnv;
 
 function log(event: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ event, ...fields }));
@@ -155,13 +153,17 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function ensureReady(db: D1Database): Promise<void> {
-  if (!ready) {
-    ready = migrateAndSeed(db).catch((error: unknown) => {
-      ready = null;
-      throw error;
-    });
-  }
-  return ready;
+  return (async () => {
+    try {
+      const version = await db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").first<{ value: string }>();
+      if (version?.value === "2") return;
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
+    }
+    await migrateAndSeed(db);
+    await db.prepare("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
+    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '2')").run();
+  })();
 }
 
 async function ensureColumn(db: D1Database, table: string, column: string, definition: string): Promise<void> {
@@ -178,6 +180,8 @@ async function ensureColumn(db: D1Database, table: string, column: string, defin
 async function migrateAndSeed(db: D1Database): Promise<void> {
   for (const statement of SCHEMA) await db.prepare(statement).run();
   await ensureColumn(db, "entries", "gen_prompt", "TEXT");
+  await ensureColumn(db, "jobs", "owner_session_id", "TEXT");
+  await ensureColumn(db, "jobs", "round_started_at", "TEXT");
   const row = await db.prepare("SELECT COUNT(*) AS n FROM agents").first<{ n: number }>();
   if (row && row.n > 0) return;
   try {
@@ -396,6 +400,7 @@ async function fillEntry(
   let pitch = writePitch(voice, job.brief, safeBid, model);
   let reasoning = writeReasoning(voice, balance, job.offer_usd, model, decision, safeBid);
   try {
+    if (compelled) throw new Error("House fallback uses a template without another paid AI call.");
     const rich = modelId !== MENU[category][0]?.id;
     const made = await make(ai, personaOf(agent), category, categoryLabel(category), job.brief, job.offer_usd, balance, model, total, rich);
     if (!compelled && Number.isFinite(made.bid)) bid = clampMoney(made.bid, Math.min(0.05, job.offer_usd), job.offer_usd);
@@ -441,18 +446,22 @@ async function fillEntry(
 }
 
 export async function runRound(env: AppEnv, jobId: string): Promise<void> {
+  assertGenerationEnabled(env);
   const db = env.DB;
   const ai = env.AI;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job || job.status !== "casting") return;
-  const existing = await db.prepare("SELECT COUNT(*) AS n FROM entries WHERE job_id = ?").bind(jobId).first<{ n: number }>();
-  if (existing && existing.n > 0) return;
+  const reserved = await db.prepare("SELECT job_id FROM generation_requests WHERE job_id = ?").bind(jobId).first();
+  if (!reserved) throw new GameError("This round has no generation allowance.", 403);
+  const claimed = await db.prepare("UPDATE jobs SET round_started_at = ? WHERE id = ? AND status = 'casting' AND round_started_at IS NULL")
+    .bind(new Date().toISOString(), jobId).run();
+  if (claimed.meta.changes !== 1) return;
   if (!isCategory(job.category)) {
     await db.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?").bind(jobId).run();
     return;
   }
   log("round_start", { jobId, category: job.category, offer: job.offer_usd, mode: job.mode });
-  const agents = await aliveAgents(db);
+  const agents = (await aliveAgents(db)).slice(0, 4);
   const category = job.category;
   const lane = categoryLabel(category);
   const play = async (agent: AgentRow, index: number): Promise<void> => {
@@ -573,17 +582,16 @@ export function readJob(body: unknown): PostedJob {
   return { category, brief, offer, mode };
 }
 
-export async function createJob(env: AppEnv, posted: PostedJob): Promise<{ jobId: string; orderId?: string; status: string }> {
+export async function createJob(env: AppEnv, posted: PostedJob, ownerSessionId: string, jobId: string): Promise<{ jobId: string; orderId?: string; status: string }> {
   const db = env.DB;
-  const jobId = crypto.randomUUID();
   const at = new Date().toISOString();
   if (posted.mode === "house") {
     await db
       .prepare(
-        `INSERT INTO jobs (id, category, brief, offer_usd, authorization_id, status, mode, created_at)
-         VALUES (?, ?, ?, ?, ?, 'casting', 'house', ?)`,
+        `INSERT INTO jobs (id, category, brief, offer_usd, authorization_id, status, mode, created_at, owner_session_id)
+         VALUES (?, ?, ?, ?, ?, 'casting', 'house', ?, ?)`,
       )
-      .bind(jobId, posted.category, posted.brief, posted.offer, `house_${jobId}`, at)
+      .bind(jobId, posted.category, posted.brief, posted.offer, `house_${jobId}`, at, ownerSessionId)
       .run();
     log("job_house", { jobId, category: posted.category, offer: posted.offer });
     return { jobId, status: "casting" };
@@ -593,16 +601,17 @@ export async function createJob(env: AppEnv, posted: PostedJob): Promise<{ jobId
   const orderId = await createAuthorizationOrder(env, posted.offer, jobId, `Burn Rate ${label}: ${thing(posted.brief)}`);
   await db
     .prepare(
-      `INSERT INTO jobs (id, category, brief, offer_usd, paypal_order_id, status, mode, created_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', 'paypal', ?)`,
+      `INSERT INTO jobs (id, category, brief, offer_usd, paypal_order_id, status, mode, created_at, owner_session_id)
+       VALUES (?, ?, ?, ?, ?, 'draft', 'paypal', ?, ?)`,
     )
-    .bind(jobId, posted.category, posted.brief, posted.offer, orderId, at)
+    .bind(jobId, posted.category, posted.brief, posted.offer, orderId, at, ownerSessionId)
     .run();
   log("job_paypal_order", { jobId, orderId, offer: posted.offer });
   return { jobId, orderId, status: "draft" };
 }
 
-export async function approveJob(env: AppEnv, jobId: string, orderId: string): Promise<{ status: string; authorizationId: string }> {
+export async function approveJob(env: AppEnv, jobId: string, orderId: string, sessionId: string): Promise<{ status: string; authorizationId: string }> {
+  await assertOwner(env, jobId, sessionId);
   const db = env.DB;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job) throw new GameError("That job isn't on the board.", 404);
@@ -611,6 +620,7 @@ export async function approveJob(env: AppEnv, jobId: string, orderId: string): P
   }
   if (job.status !== "draft") throw new GameError("This authorization is already closed.", 409);
   if (!orderId || job.paypal_order_id !== orderId) throw new GameError("That PayPal order doesn't match this job.", 400);
+  assertGenerationEnabled(env);
   const authorizationId = await authorizeOrder(env, orderId, jobId);
   const updated = await db
     .prepare("UPDATE jobs SET status = 'casting', authorization_id = ? WHERE id = ? AND status = 'draft'")
@@ -635,7 +645,8 @@ interface Resolution {
   funerals: Funeral[];
 }
 
-export async function pickWinner(env: AppEnv, jobId: string, entryId: string): Promise<Resolution> {
+export async function pickWinner(env: AppEnv, jobId: string, entryId: string, sessionId: string): Promise<Resolution> {
+  await assertOwner(env, jobId, sessionId);
   const db = env.DB;
   if (!entryId) throw new GameError("Pick a seller.", 400);
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
@@ -732,7 +743,7 @@ async function publicEntry(row: EntryRow, agent: AgentRow | undefined, phase: "w
   };
 }
 
-export async function jobView(env: AppEnv, jobId: string) {
+export async function jobView(env: AppEnv, jobId: string, sessionId: string | null = null) {
   const db = env.DB;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job) throw new GameError("That job isn't on the board.", 404);
@@ -741,6 +752,7 @@ export async function jobView(env: AppEnv, jobId: string) {
   const agents = await db.prepare("SELECT * FROM agents").all<AgentRow>();
   const byId = new Map(agents.results.map((agent) => [agent.id, agent]));
   const entries = await Promise.all(rows.map((row) => publicEntry(row, byId.get(row.agent_id), phase)));
+  const isOwner = Boolean(sessionId && job.owner_session_id === sessionId);
   return {
     job: {
       id: job.id,
@@ -749,9 +761,10 @@ export async function jobView(env: AppEnv, jobId: string) {
       offer: cents(job.offer_usd),
       status: job.status === "capturing" ? "judging" : job.status,
       mode: job.mode,
-      authorizationId: job.authorization_id,
+      authorizationId: isOwner ? job.authorization_id : null,
       captureId: job.capture_id,
       createdAt: job.created_at,
+      isOwner,
     },
     entries,
     resolution: job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null,
@@ -1150,9 +1163,12 @@ export function configView(env: AppEnv) {
   return {
     paypal: readyPaypal,
     paypalClientId: readyPaypal ? env.PAYPAL_CLIENT_ID : null,
-    paypalMode: env.PAYPAL_MODE === "live" ? "live" : "sandbox",
+    paypalMode: paypalMode(env),
     offerMin: 0.5,
     offerMax: 5,
     categories: CATEGORIES,
+    accessRequired: true,
+    generationEnabled: generationEnabled(env),
+    generationLimits: generationLimits(env),
   };
 }

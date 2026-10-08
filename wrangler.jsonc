@@ -3,10 +3,14 @@
   "name": "burn-rate",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-07",
+  "dev": {
+    "host": "localhost"
+  },
   "observability": {
     "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": false },
     "traces": {
-      "enabled": true
+      "enabled": false
     }
   },
   "routes": [
@@ -16,7 +20,9 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": true,
+    "html_handling": "drop-trailing-slash",
+    "not_found_handling": "404-page"
   },
   "ai": {
     "binding": "AI"
@@ -29,6 +35,12 @@
     }
   ],
   "vars": {
-    "PAYPAL_MODE": "sandbox"
-  }
+    "PAYPAL_MODE": "sandbox",
+    "GENERATION_ENABLED": "true",
+    "GENERATION_DAILY_LIMIT": "20",
+    "GENERATION_TOTAL_LIMIT": "50",
+    "GENERATION_SESSION_LIMIT": "3",
+    "GENERATION_IP_LIMIT": "6"
+  },
+  "triggers": { "crons": ["17 5 * * *"] }
 }

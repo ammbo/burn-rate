@@ -3,9 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:public": "node scripts/build-public.mjs",
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
+    "test:public": "node --test scripts/public.test.mjs",
+    "test:security": "node --test scripts/security.test.mjs",
     "types": "wrangler types",
+    "predeploy": "npm run build:public",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
@@ -13,6 +17,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",
+    "esbuild": "^0.28.1",
+    "miniflare": "^5.20261006.1-alpha",
     "typescript": "^5.9.3",
     "wrangler": "^4.45.0"
   }
