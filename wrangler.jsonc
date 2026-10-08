@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "burn-rate",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-07",
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  },
+  "routes": [
+    { "pattern": "burnrateagents.com", "custom_domain": true },
+    { "pattern": "www.burnrateagents.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "burn-rate",
+      "database_id": "acba24e4-7207-4b00-a3a0-043c140694e3"
+    }
+  ],
+  "vars": {
+    "PAYPAL_MODE": "sandbox"
+  }
+}
