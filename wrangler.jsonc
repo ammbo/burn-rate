@@ -18,6 +18,9 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
+  "ai": {
+    "binding": "AI"
+  },
   "d1_databases": [
     {
       "binding": "DB",

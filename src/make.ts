@@ -1,3 +1,4 @@
+import type { Work } from "./ai";
 import type { CategoryId, GenModel, Voice } from "./catalog";
 
 export interface Frame {
@@ -7,7 +8,7 @@ export interface Frame {
 }
 
 export type Deliverable =
-  | { kind: "image"; svg: string; caption: string }
+  | { kind: "image"; svg: string; caption: string; src?: string }
   | { kind: "video"; title: string; frames: Frame[]; take: string }
   | { kind: "artifact"; eyebrow: string; title: string; lede: string; points: { h: string; body: string }[] }
   | { kind: "asset"; name: string; svg: string; palette: { name: string; hex: string }[]; note: string }
@@ -202,13 +203,13 @@ function artifact(voice: Voice, brief: string, deck: boolean): Deliverable {
   return { kind: "artifact", eyebrow: pack.eyebrow, title: pack.title, lede: pack.lede, points };
 }
 
-function asset(voice: Voice, brief: string, kit: boolean): Deliverable {
+function asset(voice: Voice, brief: string, kit: boolean, given?: { name: string; palette: { name: string; hex: string }[]; note: string }): Deliverable {
   const words = brief
     .replace(/[^\w\s'-]/g, " ")
     .split(/\s+/)
     .filter((word) => word.length > 2)
     .slice(0, 2);
-  const name = words.length > 0 ? words.map((word) => word.slice(0, 1).toUpperCase() + word.slice(1, 7).toLowerCase()).join("") : "Burn";
+  const name = given?.name || (words.length > 0 ? words.map((word) => word.slice(0, 1).toUpperCase() + word.slice(1, 7).toLowerCase()).join("") : "Burn");
   const mark = name.slice(0, 2).toUpperCase();
   const palettes: Record<Voice, { name: string; hex: string }[]> = {
     deadpan: [
@@ -232,11 +233,13 @@ function asset(voice: Voice, brief: string, kit: boolean): Deliverable {
       { name: "Exit", hex: "#24170f" },
     ],
   };
-  const palette = palettes[voice];
+  const palette = given?.palette ?? palettes[voice];
   const ink = palette[0]?.hex ?? "#24170f";
   const paper = palette[1]?.hex ?? "#f3ead7";
   const svg = `<svg viewBox="0 0 360 280" xmlns="http://www.w3.org/2000/svg" role="img"><title>${esc(name)}</title><rect width="360" height="280" fill="${paper}"/><circle cx="180" cy="112" r="62" fill="${ink}"/><text x="180" y="126" fill="${paper}" font-size="36" font-family="Georgia, serif" text-anchor="middle">${esc(mark)}</text><text x="180" y="214" fill="${ink}" font-size="22" font-family="Georgia, serif" text-anchor="middle">${esc(name)}</text><text x="180" y="242" fill="${palette[2]?.hex ?? ink}" font-size="12" font-family="ui-monospace, monospace" text-anchor="middle">${kit ? "MINI KIT" : "WORDMARK"}</text></svg>`;
-  const note = kit
+  const note = given?.note
+    ? given.note
+    : kit
     ? `${name} sits on ${paper} and nowhere else. Don't put the mark in a circle of your own. It already has one. Clear space is the width of the ${mark.slice(0, 1)}.`
     : `${name}. One color, one word, no slogan hiding behind it.`;
   return { kind: "asset", name, svg, palette, note };
@@ -540,6 +543,55 @@ export function produce(voice: Voice, category: CategoryId, model: GenModel, bri
     return { kind: "standup", mode: "tape", title: bit.title, lines: bit.lines, tag: bit.tag, frames };
   }
   return { kind: "standup", mode: "bit", title: bit.title, lines: bit.lines, tag: bit.tag };
+}
+
+function clip(value: unknown, max: number): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
+}
+
+function clipList(value: unknown, max: number, count: number): string[] {
+  return Array.isArray(value) ? value.map((item) => clip(item, max)).filter(Boolean).slice(0, count) : [];
+}
+
+export function fromWork(voice: Voice, category: CategoryId, model: GenModel, brief: string, take: string, work: Work, src: string | null): Deliverable {
+  const fallback = produce(voice, category, model, brief, take);
+  if (work.kind === "image" && fallback.kind === "image") {
+    return { ...fallback, caption: clip(work.caption, 140) || fallback.caption, ...(src ? { src } : {}) };
+  }
+  if (work.kind === "video") {
+    const beats = clipList(work.beats, 120, 4);
+    if (beats.length < 4) return fallback;
+    const times = ["0:00", "0:02", "0:05", "0:07"];
+    return { kind: "video", title: clip(work.title, 90) || thing(brief), take, frames: beats.map((beat, i) => scene(voice, beat, times[i] ?? "0:00", true)) };
+  }
+  if (work.kind === "artifact") {
+    const points = Array.isArray(work.points)
+      ? work.points.map((point) => ({ h: clip(point?.h, 60), body: clip(point?.body, 240) })).filter((point) => point.h && point.body).slice(0, model.id === "deck" ? 5 : 3)
+      : [];
+    if (points.length === 0) return fallback;
+    return { kind: "artifact", eyebrow: clip(work.eyebrow, 40), title: clip(work.title, 90) || thing(brief), lede: clip(work.lede, 240), points };
+  }
+  if (work.kind === "asset") {
+    const palette = Array.isArray(work.palette)
+      ? work.palette.map((color) => ({ name: clip(color?.name, 20), hex: clip(color?.hex, 7) })).filter((color) => /^#[0-9a-f]{6}$/i.test(color.hex)).slice(0, 3)
+      : [];
+    const name = clip(work.name, 14).replace(/[<>&"']/g, "");
+    if (!name || palette.length < 3) return fallback;
+    return asset(voice, brief, model.id === "kit", { name, palette, note: clip(work.note, 280) });
+  }
+  if (work.kind === "standup") {
+    const lines = clipList(work.lines, 200, 7);
+    if (lines.length < 3) return fallback;
+    const title = clip(work.title, 80) || "Untitled";
+    const tag = clip(work.tag, 60);
+    if (model.id === "tape") {
+      const times = ["0:02", "0:08", "0:16", "0:24"];
+      const frames = lines.slice(0, 4).map((line, i) => scene(voice, line, times[i] ?? "0:00", false));
+      return { kind: "standup", mode: "tape", title, lines, tag, frames };
+    }
+    return { kind: "standup", mode: "bit", title, lines, tag };
+  }
+  return fallback;
 }
 
 export function writePitch(voice: Voice, brief: string, bid: number, model: GenModel): string {

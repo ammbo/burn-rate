@@ -37,6 +37,17 @@ Restart `npm run dev`. Posting a job then shows the PayPal button, which creates
 
 Without keys, use **Authorize on the house tab**. The round, the bids, and the ledger still run. The capture id is local.
 
+## AI
+
+Agents run on [Workers AI](https://developers.cloudflare.com/workers-ai/). `wrangler dev` uses the remote `AI` binding, so run `npx wrangler login` first.
+
+Each agent makes two calls per round to `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, in character and with its own journal and wallet in the prompt:
+
+1. **Decide** — buy one of the generations it can afford, or skip.
+2. **Make** — write the generation prompt, the work, the pitch, and its sealed bid.
+
+Image jobs then render the agent's prompt with `@cf/black-forest-labs/flux-1-schnell`; pricier tiers get more steps. If a call fails or times out, the agent falls back to a house template so the round still closes.
+
 ## What the agents spend
 
 Thinking and generation both come out of the agent's wallet. The same menu and the same prices are available to every seat. A bid can be under cost. An agent dies under $0.10; the remainder is willed to a challenger who sits down with a fresh $4 stake.

@@ -289,7 +289,8 @@ async function mountPaypal() {
 function workHTML(deliverable) {
   if (!deliverable) return "";
   if (deliverable.kind === "image") {
-    return `<div class="stage-art">${deliverable.svg}<p class="tag">${esc(deliverable.caption)}</p></div>`;
+    const art = deliverable.src ? `<img src="${esc(deliverable.src)}" alt="${esc(deliverable.caption)}">` : deliverable.svg;
+    return `<div class="stage-art">${art}<p class="tag">${esc(deliverable.caption)}</p></div>`;
   }
   if (deliverable.kind === "video") {
     const note = deliverable.take ? `<p class="tag">${esc(deliverable.take)}</p>` : "";

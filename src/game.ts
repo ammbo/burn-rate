@@ -9,6 +9,7 @@ import {
   asVoice,
   categoryLabel,
   cents,
+  clampMoney,
   isCategory,
   pickModel,
   priceBid,
@@ -18,7 +19,8 @@ import {
   type Voice,
 } from "./catalog";
 import { GameError } from "./errors";
-import { interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
+import { decide, make, paint, type Persona } from "./ai";
+import { fromWork, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
 import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, type PaypalEnv } from "./paypal";
 
 const SCHEMA = [
@@ -139,6 +141,7 @@ interface EntryRow {
 
 export interface AppEnv extends PaypalEnv {
   DB: D1Database;
+  AI: Ai;
 }
 
 let ready: Promise<void> | null = null;
@@ -359,8 +362,15 @@ async function entriesFor(db: D1Database, jobId: string): Promise<EntryRow[]> {
   return rows.results;
 }
 
+const IMAGE_STEPS: Record<string, number> = { sketch: 4, poster: 6, hero: 8 };
+
+function personaOf(agent: AgentRow): Persona {
+  return { name: agent.name, voice: asVoice(agent.voice), tagline: agent.tagline, journal: agent.journal_md };
+}
+
 async function fillEntry(
   db: D1Database,
+  ai: Ai,
   entryId: string,
   agent: AgentRow,
   job: JobRow,
@@ -380,9 +390,25 @@ async function fillEntry(
   const safeBid = cents(Math.min(rawBid, job.offer_usd));
   const model = { id: modelId, label: modelLabel, cost: modelCost };
   const reading = interpret(voice, category, model, job.brief);
-  const deliverable = produce(voice, category, model, job.brief, reading.take);
-  const pitch = writePitch(voice, job.brief, safeBid, model);
+  let bid = safeBid;
+  let prompt = reading.prompt;
+  let deliverable = produce(voice, category, model, job.brief, reading.take);
+  let pitch = writePitch(voice, job.brief, safeBid, model);
   let reasoning = writeReasoning(voice, balance, job.offer_usd, model, decision, safeBid);
+  try {
+    const rich = modelId !== MENU[category][0]?.id;
+    const made = await make(ai, personaOf(agent), category, categoryLabel(category), job.brief, job.offer_usd, balance, model, total, rich);
+    if (!compelled && Number.isFinite(made.bid)) bid = clampMoney(made.bid, Math.min(0.05, job.offer_usd), job.offer_usd);
+    prompt = made.prompt.trim().slice(0, 600) || prompt;
+    const take = made.take.trim().slice(0, 80) || reading.take;
+    const steps = IMAGE_STEPS[modelId];
+    const src = category === "image" && steps ? await paint(ai, prompt, steps).catch(() => null) : null;
+    deliverable = fromWork(voice, category, model, job.brief, take, made.work, src);
+    pitch = made.pitch.trim().slice(0, 280) || writePitch(voice, job.brief, bid, model);
+    reasoning = made.reasoning.trim().slice(0, 400) || writeReasoning(voice, balance, job.offer_usd, model, decision, bid);
+  } catch (error) {
+    log("ai_make_failed", { jobId: job.id, agentId: agent.id, message: error instanceof Error ? error.message : "error" });
+  }
   if (compelled) reasoning = `House rule: the room doesn't adjourn without a seller. ${reasoning}`;
   const due = cents((decisionAlreadyBilled ? 0 : decision) + modelCost);
   const canPay = balance >= due;
@@ -404,11 +430,11 @@ async function fillEntry(
       modelLabel,
       decisionAlreadyBilled || canPay ? decision : 0,
       canPay ? modelCost : 0,
-      safeBid,
+      bid,
       pitch,
       JSON.stringify(deliverable),
       canPay ? reasoning : `${reasoning} House comped the make.`,
-      reading.prompt,
+      prompt,
       entryId,
     )
     .run();
@@ -416,6 +442,7 @@ async function fillEntry(
 
 export async function runRound(env: AppEnv, jobId: string): Promise<void> {
   const db = env.DB;
+  const ai = env.AI;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job || job.status !== "casting") return;
   const existing = await db.prepare("SELECT COUNT(*) AS n FROM entries WHERE job_id = ?").bind(jobId).first<{ n: number }>();
@@ -426,58 +453,76 @@ export async function runRound(env: AppEnv, jobId: string): Promise<void> {
   }
   log("round_start", { jobId, category: job.category, offer: job.offer_usd, mode: job.mode });
   const agents = await aliveAgents(db);
-  for (const agent of agents) {
+  const category = job.category;
+  const lane = categoryLabel(category);
+  const play = async (agent: AgentRow, index: number): Promise<void> => {
     const entryId = crypto.randomUUID();
     try {
-    const voice = asVoice(agent.voice);
-    const at = new Date().toISOString();
-    await db
-      .prepare(
-        `INSERT INTO entries (id, job_id, agent_id, status, cost_decision, cost_generation, created_at)
-         VALUES (?, ?, ?, 'thinking', 0, 0, ?)`,
-      )
-      .bind(entryId, job.id, agent.id, at)
-      .run();
-    await sleep(520);
-    const balance = await balanceOf(db, agent.id);
-    const decision = DECISION_COST[voice];
-    if (balance < decision) {
+      const voice = asVoice(agent.voice);
+      await sleep(index * 350);
       await db
-        .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, reasoning = ? WHERE id = ?")
-        .bind("Too broke to think.", "The wallet could not cover a thought.", entryId)
+        .prepare(
+          `INSERT INTO entries (id, job_id, agent_id, status, cost_decision, cost_generation, created_at)
+           VALUES (?, ?, ?, 'thinking', 0, 0, ?)`,
+        )
+        .bind(entryId, job.id, agent.id, new Date().toISOString())
         .run();
-      continue;
-    }
-    const model = pickModel(voice, job.category, balance, job.offer_usd);
-    if (!model) {
-      await postLedger(db, agent.id, "decision_tokens", -decision, job.id, `Looked at ${categoryLabel(job.category)} and sat down`);
+      const balance = await balanceOf(db, agent.id);
+      const decision = DECISION_COST[voice];
+      if (balance < decision) {
+        await db
+          .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, reasoning = ? WHERE id = ?")
+          .bind("Too broke to think.", "The wallet could not cover a thought.", entryId)
+          .run();
+        return;
+      }
+      const affordable = MENU[category].filter((option) => balance >= cents(decision + option.cost));
+      if (affordable.length === 0) {
+        await postLedger(db, agent.id, "decision_tokens", -decision, job.id, `Looked at ${lane} and sat down`);
+        await db
+          .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, cost_decision = ?, reasoning = ? WHERE id = ?")
+          .bind("Can't cover a generation.", decision, "Thinking was affordable. Making the work was not.", entryId)
+          .run();
+        return;
+      }
+      let model = pickModel(voice, category, balance, job.offer_usd);
+      let skip = model ? wantsToSkip(voice, category, balance, model, job.offer_usd) : null;
+      try {
+        const call = await decide(ai, personaOf(agent), category, lane, job.brief, job.offer_usd, balance, decision, affordable);
+        const reason = call.reason.trim().slice(0, 200);
+        if (call.choice.trim().toLowerCase() === "skip") {
+          skip = reason || "Not this one.";
+        } else {
+          const chosen = affordable.find((option) => option.id === call.choice.trim());
+          if (chosen) {
+            model = chosen;
+            skip = null;
+          }
+        }
+      } catch (error) {
+        log("ai_decide_failed", { jobId, agentId: agent.id, message: error instanceof Error ? error.message : "error" });
+      }
+      if (skip || !model) {
+        const why = skip ?? "Can't cover a generation.";
+        await postLedger(db, agent.id, "decision_tokens", -decision, job.id, `Passed on ${lane}`);
+        await db
+          .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, cost_decision = ?, reasoning = ? WHERE id = ?")
+          .bind(why, decision, why, entryId)
+          .run();
+        return;
+      }
       await db
-        .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, cost_decision = ?, reasoning = ? WHERE id = ?")
-        .bind("Can't cover a generation.", decision, "Thinking was affordable. Making the work was not.", entryId)
+        .prepare("UPDATE entries SET status = 'generating', gen_model = ?, gen_label = ?, cost_decision = ? WHERE id = ?")
+        .bind(model.id, model.label, decision, entryId)
         .run();
-      continue;
-    }
-    const skip = wantsToSkip(voice, job.category, balance, model, job.offer_usd);
-    if (skip) {
-      await postLedger(db, agent.id, "decision_tokens", -decision, job.id, `Passed on ${categoryLabel(job.category)}`);
-      await db
-        .prepare("UPDATE entries SET status = 'skipped', skip_reason = ?, cost_decision = ?, reasoning = ? WHERE id = ?")
-        .bind(skip, decision, skip, entryId)
-        .run();
-      continue;
-    }
-    await db
-      .prepare("UPDATE entries SET status = 'generating', gen_model = ?, gen_label = ?, cost_decision = ? WHERE id = ?")
-      .bind(model.id, model.label, decision, entryId)
-      .run();
-    await sleep(740);
-    await fillEntry(db, entryId, agent, job, model.id, model.label, model.cost, false, false);
+      await fillEntry(db, ai, entryId, agent, job, model.id, model.label, model.cost, false, false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "error";
       log("agent_failed", { jobId, agentId: agent.id, message });
       await db.prepare("UPDATE entries SET status = 'skipped', skip_reason = ? WHERE id = ?").bind("Choked on the brief.", entryId).run();
     }
-  }
+  };
+  await Promise.all(agents.map(play));
 
   const readyCount = await db.prepare("SELECT COUNT(*) AS n FROM entries WHERE job_id = ? AND status = 'ready'").bind(jobId).first<{ n: number }>();
   if (!readyCount || readyCount.n === 0) {
@@ -496,7 +541,7 @@ export async function runRound(env: AppEnv, jobId: string): Promise<void> {
       .first<{ id: string; status: string; cost_decision: number }>();
     if (entry) {
       const billed = entry.status === "skipped" && entry.cost_decision > 0;
-      await fillEntry(db, entry.id, richest.agent, job, cheap.id, cheap.label, cheap.cost, true, billed);
+      await fillEntry(db, ai, entry.id, richest.agent, job, cheap.id, cheap.label, cheap.cost, true, billed);
     }
   }
 
