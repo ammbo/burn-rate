@@ -48,8 +48,8 @@ const str = { type: "string" };
 const PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  properties: { choice: str, reason: str, prompt: str, take: str, pitch: str, bid: { type: "number" }, reasoning: str },
-  required: ["choice", "reason", "prompt", "take", "pitch", "bid", "reasoning"],
+  properties: { choice: str, reason: str, prompt: str, take: str, pitch: str, bid: { type: "number" }, notes: str },
+  required: ["choice", "reason", "prompt", "take", "pitch", "bid", "notes"],
 };
 
 const FORMAT: Record<CategoryId, string> = {
@@ -86,9 +86,11 @@ export async function plan(
     "take: a title or caption for your piece, under 10 words. Empty if skipping.",
     "pitch: one or two full sentences to the buyer, 15 to 35 words, in your voice, about why yours is the one to pay for. Do not reveal your name or model. Empty if skipping.",
     `bid: your price in US dollars, between 0.05 and ${offer.toFixed(2)}. Bidding under your cost is allowed but bleeds your wallet; bidding near the maximum may lose to a cheaper seller. 0 if skipping.`,
-    "reasoning: your private reasoning about price and model choice, under 40 words. The buyer sees it only after paying.",
+    "notes: your private notes on price and model choice, under 40 words. The buyer sees them only after paying.",
   ].join("\n");
-  return chatJson<Plan>(env, persona.brain, system(persona), user, "plan", PLAN_SCHEMA, 6000);
+  const result = await chatJson<Omit<Plan, "reasoning"> & { notes: string }>(env, persona.brain, system(persona), user, "plan", PLAN_SCHEMA, 6000);
+  const { notes, ...rest } = result.value;
+  return { value: { ...rest, reasoning: notes }, cost: result.cost };
 }
 
 function writingSchema(category: "artifact" | "standup"): Record<string, unknown> {

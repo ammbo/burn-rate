@@ -520,7 +520,16 @@ async function planEntry(env: AppEnv, jobId: string, cast: Cast): Promise<Planne
     await skipEntry(db, cast.entryId, "Too broke to think.");
     return { go: false };
   }
-  const menu = MAKERS[category];
+  const down = await db
+    .prepare(
+      `SELECT DISTINCT e.gen_model FROM entries e JOIN jobs j ON j.id = e.job_id
+       WHERE e.status = 'skipped' AND e.skip_reason LIKE '% render failed.' AND j.created_at > ?`,
+    )
+    .bind(new Date(Date.now() - 30 * 60_000).toISOString())
+    .all<{ gen_model: string | null }>();
+  const failing = new Set(down.results.map((row) => row.gen_model));
+  const working = MAKERS[category].filter((maker) => !failing.has(maker.id));
+  const menu = working.length > 0 ? working : MAKERS[category];
   let result;
   try {
     result = await plan(env, personaOf(agent), category, lane, job.brief, job.offer_usd, balance, menu, await historyFor(db, agent.id, balance));

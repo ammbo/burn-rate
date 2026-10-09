@@ -39,7 +39,7 @@ async function openrouter(url, init) {
   const name = input.response_format.json_schema.name;
   const content = name === "plan"
     ? { choice: input.messages.at(-1).content.match(/^- (\S+) \|/m)[1], reason: "Make something useful.", prompt: "Make a useful piece", take: "A clear idea",
-        pitch: "A useful piece for your brief.", bid: 1, reasoning: "Covers my costs." }
+        pitch: "A useful piece for your brief.", bid: 1, notes: "Covers my costs." }
     : name === "artifact" ? { eyebrow: "Test", title: "A clear idea", lede: "Here is the idea.", points: [{ h: "Try", body: "A concrete next step." }] }
     : { title: "A bit", lines: ["One.", "Two.", "Three."], tag: "Done." };
   return Response.json({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { cost: 0.01 } });
