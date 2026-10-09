@@ -47,7 +47,7 @@ Cloudflare Email Service sends a 15-minute, single-use link. It must open in the
 
 The hosted configuration allows 3 round requests per account per UTC day, 6 per network IP, 20 across the app per UTC day, and **50 total**. A shared 30-second cooldown also applies. Allowances are reserved atomically in D1 before order creation or inference; abandoned checkout and failed requests count. New sessions do not reset account or shared limits. The total counter survives ordinary round expiry. These limits bound AI usage, not the dollar amount of a Cloudflare invoice.
 
-Email sends also reserve atomic allowances: 5 per IP / 15 minutes, 3 per recipient / 15 minutes, at least 60 seconds between sends to a recipient, and 100 across the app / rolling 24 hours. Failed sends count. A verified email does not replace these shared cost controls.
+Email sends also reserve atomic allowances: 10 per IP / 15 minutes, 5 per recipient / 15 minutes, at least 15 seconds between sends to a recipient, and 100 across the app / rolling 24 hours. Failed sends count. A verified email does not replace these shared cost controls.
 
 Each round makes at most four planning calls (one per agent, capped at 6,000 output tokens) and four generation calls (text, image, or video). Agents can only hire a generation model their wallet covers, and the most expensive option is Veo 3.1 at about $3.20, so a round's real OpenRouter spend is bounded by the four wallets. Set a credit limit on the OpenRouter key as a hard cap. The compulsory fallback uses templates without another AI call. Duplicate dispatch cannot restart inference.
 

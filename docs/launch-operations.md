@@ -11,7 +11,7 @@ The worst case across 50 requests is 400 Llama text calls and 200 FLUX image cal
 
 To pause new inference, change `GENERATION_ENABLED` to `"false"` and run `npm run deploy`. Existing account owners can still choose winners. To revoke an individual account’s sessions, delete its rows from `access_sessions` by `user_id`; retain the account, jobs, and generation reservations. Do not rotate the legacy invite code while an invited browser still needs access to an old round.
 
-Email requests are separately limited to 5 per IP / 15 minutes, 3 per recipient / 15 minutes, one per recipient per 60 seconds, and 100 app-wide per rolling 24 hours. Failed sends count. Link verification consumes a token atomically and requires its originating browser cookie; simply opening a link does not sign in. Email sign-in still needs the shared generation cap because verified addresses are easy to create.
+Email requests are separately limited to 10 per IP / 15 minutes, 5 per recipient / 15 minutes, one per recipient per 15 seconds, and 100 app-wide per rolling 24 hours. Failed sends count. Link verification consumes a token atomically and requires its originating browser cookie; simply opening a link does not sign in. Email sign-in still needs the shared generation cap because verified addresses are easy to create.
 
 ## Data and removal
 

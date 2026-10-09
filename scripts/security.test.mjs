@@ -152,13 +152,13 @@ test("email sends have atomic per-recipient, per-IP and shared caps, including f
   assert.equal((await request("/api/session/email", { method: "POST", body: { email: "bad\r\naddress" } })).status, 400);
   await emailLink("same@example.com");
   assert.equal((await request("/api/session/email", { method: "POST", body: { email: "SAME@example.com" }, ip: "203.0.113.99" })).status, 429);
-  const attempts = await Promise.all(Array.from({ length: 8 }, (_, i) => request("/api/session/email", { method: "POST", body: { email: `another-${i}@example.com` } })));
-  assert.equal(attempts.filter((response) => response.status === 200).length, 4);
+  const attempts = await Promise.all(Array.from({ length: 12 }, (_, i) => request("/api/session/email", { method: "POST", body: { email: `another-${i}@example.com` } })));
+  assert.equal(attempts.filter((response) => response.status === 200).length, 9);
   await env.DB.prepare("DELETE FROM email_requests").run();
   env.EMAIL.send = async () => { throw new Error("private provider error"); };
-  for (let i = 0; i < 5; i++) assert.equal((await request("/api/session/email", { method: "POST", body: { email: `fail-${i}@example.com` } })).status, 503);
+  for (let i = 0; i < 10; i++) assert.equal((await request("/api/session/email", { method: "POST", body: { email: `fail-${i}@example.com` } })).status, 503);
   assert.equal((await request("/api/session/email", { method: "POST", body: { email: "limited@example.com" } })).status, 429);
-  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM email_requests").first()).n, 5);
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM email_requests").first()).n, 10);
   await env.DB.prepare("DELETE FROM email_requests").run();
   for (let i = 0; i < 100; i++) await env.DB.prepare("INSERT INTO email_requests VALUES (?, ?, ?, ?)").bind(String(i), String(i), String(i), Date.now()).run();
   assert.equal((await request("/api/session/email", { method: "POST", body: { email: "global@example.com" }, ip: "203.0.113.77" })).status, 429);

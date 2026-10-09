@@ -168,10 +168,10 @@ export async function requestSignIn(env: AccessEnv, request: Request, input: unk
   const reserved = await env.DB.prepare(`INSERT INTO email_requests (id, email_hash, ip_hash, created_at)
     SELECT ?, ?, ?, ? WHERE
     (SELECT COUNT(*) FROM email_requests WHERE created_at > ?) < 100 AND
-    (SELECT COUNT(*) FROM email_requests WHERE ip_hash = ? AND created_at > ?) < 5 AND
-    (SELECT COUNT(*) FROM email_requests WHERE email_hash = ? AND created_at > ?) < 3 AND
+    (SELECT COUNT(*) FROM email_requests WHERE ip_hash = ? AND created_at > ?) < 10 AND
+    (SELECT COUNT(*) FROM email_requests WHERE email_hash = ? AND created_at > ?) < 5 AND
     NOT EXISTS (SELECT 1 FROM email_requests WHERE email_hash = ? AND created_at > ?)`)
-    .bind(crypto.randomUUID(), emailHash, ip, now, now - 86400000, ip, now - 900000, emailHash, now - 900000, emailHash, now - 60000).run();
+    .bind(crypto.randomUUID(), emailHash, ip, now, now - 86400000, ip, now - 900000, emailHash, now - 900000, emailHash, now - 15000).run();
   if (reserved.meta.changes !== 1) throw new GameError("Too many sign-in emails requested. Wait a few minutes before trying again.", 429);
   const token = randomToken();
   const browser = cookieToken(request, LOGIN_COOKIE) ?? randomToken();
