@@ -2,8 +2,10 @@ import {
   CATEGORIES,
   CHALLENGERS,
   DEATH_LINE,
+  HOUSE_MARKUP,
   MAKERS,
-  MENU,
+  OFFER_MAX,
+  OFFER_SLOTS,
   OPENING,
   STAKE,
   asVoice,
@@ -11,9 +13,12 @@ import {
   cents,
   clampMoney,
   isCategory,
+  houseRate,
   makerFor,
-  priceBid,
+  offerMinFor,
+  renderCost,
   seatNamed,
+  slotsFor,
   type CategoryId,
   type Maker,
   type MakerKind,
@@ -27,15 +32,15 @@ import {
   emailConfigured,
   generationEnabled,
   generationLimits,
-  notifyOffersReady,
+  notifyRoundClosed,
   releaseGeneration,
   reserveGeneration,
   type AccessEnv,
 } from "./access";
-import { plan, write, type Persona } from "./ai";
-import { fromMedia, fromWriting, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
+import { greenlight, plan, write, type Persona } from "./ai";
+import { fromMedia, fromWriting, thing, writePitch, type Deliverable } from "./make";
 import { downloadVideo, image, pollVideo, submitVideo, type OpenRouterEnv, type VideoJob } from "./openrouter";
-import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, paypalMode, type PaypalEnv } from "./paypal";
+import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, paypalMode, voidAuthorization, type PaypalEnv } from "./paypal";
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS agents (
@@ -137,6 +142,7 @@ interface JobRow {
   created_at: string;
   owner_session_id: string | null;
   round_started_at?: string | null;
+  producer_cost?: number | null;
 }
 
 interface EntryRow {
@@ -155,6 +161,8 @@ interface EntryRow {
   reasoning: string | null;
   gen_prompt: string | null;
   created_at: string;
+  billed_generation: number | null;
+  producer_note: string | null;
 }
 
 export type AppEnv = Env & PaypalEnv & AccessEnv & OpenRouterEnv;
@@ -171,13 +179,13 @@ export function ensureReady(db: D1Database): Promise<void> {
   return (async () => {
     try {
       const version = await db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").first<{ value: string }>();
-      if (version?.value === "5") return;
+      if (version?.value === "7") return;
     } catch (error) {
       if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
     }
     await migrateAndSeed(db);
     await db.prepare("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
-    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '5')").run();
+    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '7')").run();
   })();
 }
 
@@ -200,6 +208,11 @@ async function migrateAndSeed(db: D1Database): Promise<void> {
   await ensureColumn(db, "access_sessions", "user_id", "TEXT");
   await ensureColumn(db, "jobs", "round_token", "TEXT");
   await ensureColumn(db, "agents", "brain_model", "TEXT");
+  // v6: what OpenRouter billed for a render; cost_generation is what the agent paid at the house rate.
+  await ensureColumn(db, "entries", "billed_generation", "REAL");
+  // v7: the producer's note on each pitch it judged, and what the house paid for that call.
+  await ensureColumn(db, "entries", "producer_note", "TEXT");
+  await ensureColumn(db, "jobs", "producer_cost", "REAL");
   // v5 reserves allowance when a PayPal round is authorized, not when its order is
   // created. Drafts never ran inference, so their old reservations are returned.
   await db.prepare("DELETE FROM generation_requests WHERE job_id IN (SELECT id FROM jobs WHERE status = 'draft' AND mode = 'paypal')").run();
@@ -360,6 +373,16 @@ async function buryIfBroke(db: D1Database, agent: AgentRow, used: Set<string>): 
   };
 }
 
+async function buryTheBroke(db: D1Database): Promise<Funeral[]> {
+  const funerals: Funeral[] = [];
+  const names = usedNames(await db.prepare("SELECT name FROM agents").all<{ name: string }>().then((result) => result.results));
+  for (const living of await aliveAgents(db)) {
+    const funeral = await buryIfBroke(db, living, names);
+    if (funeral) funerals.push(funeral);
+  }
+  return funerals;
+}
+
 function appendJournal(current: string, note: string): string {
   const [head, ...rest] = current.split("\n---\n");
   const notes = rest.join("\n---\n").trim();
@@ -411,7 +434,7 @@ interface Cast {
   agentId: string;
 }
 
-type Planned = { go: false } | { go: true; makerId: string; kind: MakerKind; prompt: string; take: string };
+type Planned = { go: false } | { go: true; makerId: string; kind: MakerKind; prompt: string; take: string; seconds: number };
 
 function personaOf(agent: AgentRow): Persona {
   const seat = seatNamed(agent.name);
@@ -435,15 +458,15 @@ async function historyFor(db: D1Database, agentId: string, balance: number): Pro
   const stats = await record(db, agentId);
   const mine = await db
     .prepare(
-      `SELECT j.category, j.offer_usd, e.status, e.skip_reason, e.gen_label, e.bid, e.cost_decision + e.cost_generation AS spent,
+      `SELECT j.category, j.offer_usd, j.status AS job_status, e.status, e.skip_reason, e.producer_note, e.gen_label, e.bid, e.cost_decision + e.cost_generation AS spent,
               j.captured_amount, (j.winner_entry_id = e.id) AS won, w.gen_label AS win_label, wa.base_model AS win_model
        FROM entries e JOIN jobs j ON j.id = e.job_id
        LEFT JOIN entries w ON w.id = j.winner_entry_id LEFT JOIN agents wa ON wa.id = w.agent_id
-       WHERE e.agent_id = ? AND j.status = 'captured'
+       WHERE e.agent_id = ? AND j.status IN ('captured', 'passed')
        ORDER BY j.created_at DESC LIMIT 6`,
     )
     .bind(agentId)
-    .all<{ category: string; offer_usd: number; status: string; skip_reason: string | null; gen_label: string | null; bid: number | null; spent: number; captured_amount: number | null; won: number; win_label: string | null; win_model: string | null }>();
+    .all<{ category: string; offer_usd: number; job_status: string; status: string; skip_reason: string | null; producer_note: string | null; gen_label: string | null; bid: number | null; spent: number; captured_amount: number | null; won: number; win_label: string | null; win_model: string | null }>();
   const market = await db
     .prepare(
       `SELECT j.category, j.offer_usd, j.captured_amount, w.gen_label, a.base_model,
@@ -452,18 +475,26 @@ async function historyFor(db: D1Database, agentId: string, balance: number): Pro
        WHERE j.status = 'captured' ORDER BY j.created_at DESC LIMIT 6`,
     )
     .all<{ category: string; offer_usd: number; captured_amount: number | null; gen_label: string | null; base_model: string; sellers: number }>();
+  const unsold = await db
+    .prepare("SELECT category, offer_usd FROM jobs WHERE status = 'passed' ORDER BY created_at DESC LIMIT 4")
+    .all<{ category: string; offer_usd: number }>();
   const lines = [
     `You: wallet ${usd4(balance)}, ${stats.wins} wins in ${stats.entries} entries, earned ${usd4(stats.earnings)}, spent ${usd4(stats.spent)}.`,
   ];
   if (mine.results.length === 0) lines.push("Your recent rounds: none settled yet.");
   for (const row of mine.results) {
     const lane = isCategory(row.category) ? categoryLabel(row.category) : row.category;
-    if (row.status === "skipped") {
+    const producer = row.producer_note ? ` Producer's note: "${row.producer_note}"` : "";
+    if (row.status === "skipped" && row.producer_note) {
+      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: the producer passed on your pitch, so nothing was made.${producer}${row.job_status === "captured" ? ` Winner: ${row.win_model ?? "?"} with ${row.win_label ?? "?"} at $${(row.captured_amount ?? 0).toFixed(2)}.` : ""}`);
+    } else if (row.job_status === "passed") {
+      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: nobody sold. You passed (${row.skip_reason ?? "no reason"}).`);
+    } else if (row.status === "skipped") {
       lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: you skipped (${row.skip_reason ?? "no reason"}). Winner: ${row.win_model ?? "?"} with ${row.win_label ?? "?"} at $${(row.captured_amount ?? 0).toFixed(2)}.`);
     } else if (row.won) {
-      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: you WON with ${row.gen_label ?? "?"} at $${(row.bid ?? 0).toFixed(2)}, spent ${usd4(row.spent)}.`);
+      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: you WON with ${row.gen_label ?? "?"} at $${(row.bid ?? 0).toFixed(2)}, spent ${usd4(row.spent)}.${producer}`);
     } else {
-      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: you LOST bidding $${(row.bid ?? 0).toFixed(2)} with ${row.gen_label ?? "?"} (spent ${usd4(row.spent)}). Winner: ${row.win_model ?? "?"} with ${row.win_label ?? "?"} at $${(row.captured_amount ?? 0).toFixed(2)}.`);
+      lines.push(`- ${lane}, offer $${row.offer_usd.toFixed(2)}: you LOST bidding $${(row.bid ?? 0).toFixed(2)} with ${row.gen_label ?? "?"} (spent ${usd4(row.spent)}). Winner: ${row.win_model ?? "?"} with ${row.win_label ?? "?"} at $${(row.captured_amount ?? 0).toFixed(2)}.${producer}`);
     }
   }
   if (market.results.length > 0) {
@@ -472,6 +503,10 @@ async function historyFor(db: D1Database, agentId: string, balance: number): Pro
       const lane = isCategory(row.category) ? categoryLabel(row.category) : row.category;
       lines.push(`- ${lane}: ${row.base_model} won with ${row.gen_label ?? "?"} at $${(row.captured_amount ?? 0).toFixed(2)} of $${row.offer_usd.toFixed(2)}, against ${Math.max(0, row.sellers - 1)} other sellers.`);
     }
+  }
+  if (unsold.results.length > 0) {
+    const jobs = unsold.results.map((row) => `${isCategory(row.category) ? categoryLabel(row.category) : row.category} at $${row.offer_usd.toFixed(2)}`);
+    lines.push(`Recent jobs every seller passed on: ${jobs.join(", ")}.`);
   }
   return lines.join("\n");
 }
@@ -547,10 +582,19 @@ async function planEntry(env: AppEnv, jobId: string, cast: Cast): Promise<Planne
     .all<{ gen_model: string | null }>();
   const failing = new Set(down.results.map((row) => row.gen_model));
   const working = MAKERS[category].filter((maker) => !failing.has(maker.id));
-  const menu = working.length > 0 ? working : MAKERS[category];
+  // Only offer renders, and video lengths, the agent's wallet can pay for at the house rate.
+  const covers = (cost: number) => houseRate(cost) + THINK_FLOOR <= balance;
+  const menu = (working.length > 0 ? working : MAKERS[category])
+    .map((maker) => (maker.video ? { ...maker, video: { ...maker.video, durations: maker.video.durations.filter((length) => covers(maker.video!.perSecond * length)) } } : maker))
+    .filter((maker) => (maker.video ? maker.video.durations.length > 0 : covers(maker.estimate)));
+  if (menu.length === 0) {
+    // No thinking call: this agent couldn't pay for any render.
+    await skipEntry(db, cast.entryId, `My wallet can't cover a ${lane.toLowerCase()} render.`);
+    return { go: false };
+  }
   let result;
   try {
-    result = await plan(env, personaOf(agent), category, lane, job.brief, job.offer_usd, balance, menu, await historyFor(db, agent.id, balance));
+    result = await plan(env, personaOf(agent), category, lane, job.brief, job.offer_usd, balance, menu, await historyFor(db, agent.id, balance), slotsFor(job.offer_usd));
   } catch (error) {
     log("plan_failed", { jobId, agentId: agent.id, model: agent.brain_model, message: error instanceof Error ? error.message : "error" });
     await skipEntry(db, cast.entryId, "Froze at the brief. The model didn't answer.");
@@ -565,33 +609,46 @@ async function planEntry(env: AppEnv, jobId: string, cast: Cast): Promise<Planne
     await skipEntry(db, cast.entryId, reason || "Sat this one out.", thinking);
     return { go: false };
   }
-  const maker = makerFor(category, choice) ?? menu.find((option) => option.label.toLowerCase() === choice.toLowerCase());
+  const maker = menu.find((option) => option.id === choice || option.label.toLowerCase() === choice.toLowerCase());
   if (!maker) {
-    await skipEntry(db, cast.entryId, `Asked for ${choice || "nothing"}, which isn't on the menu.`, thinking);
+    await skipEntry(db, cast.entryId, `Asked for ${choice || "nothing"}, which isn't on the menu for this job.`, thinking);
     return { go: false };
   }
-  if (balance - thinking < maker.estimate) {
+  // Video length is the agent's call: the nearest listed length its wallet covers (shortest if unclear).
+  let seconds = 0;
+  if (maker.video) {
+    const { durations, perSecond } = maker.video;
+    const covered = durations.filter((length) => houseRate(perSecond * length) <= balance - thinking);
+    const asked = Number(p.seconds);
+    const wanted = Number.isFinite(asked) && asked > 0 ? asked : Math.min(...durations);
+    seconds = covered.reduce((best, length) => (Math.abs(length - wanted) < Math.abs(best - wanted) ? length : best), covered[0] ?? 0);
+  }
+  const rate = houseRate(renderCost(maker, seconds));
+  if ((maker.video && seconds === 0) || balance - thinking < rate) {
     await skipEntry(db, cast.entryId, `Wanted ${maker.label} and couldn't cover it.`, thinking);
     return { go: false };
   }
+  const label = seconds ? `${maker.label} · ${seconds}s` : maker.label;
   const prompt = clip(p.prompt, 1500);
   if (!prompt) {
     await skipEntry(db, cast.entryId, "Hired a model and forgot to brief it.", thinking);
     return { go: false };
   }
+  // Agents may bid under cost; the house rate already builds margin into what they think it costs.
   const rawBid = Number(p.bid);
-  const bid = clampMoney(Number.isFinite(rawBid) && rawBid > 0 ? rawBid : maker.estimate * 2, Math.min(0.05, job.offer_usd), job.offer_usd);
+  const bid = clampMoney(Number.isFinite(rawBid) && rawBid > 0 ? rawBid : (thinking + rate) * 2, Math.min(0.05, job.offer_usd), job.offer_usd);
   const take = clip(p.take, 90) || thing(job.brief);
-  const pitch = clip(p.pitch, 300) || writePitch(asVoice(agent.voice), job.brief, bid, MENU[category][0]);
+  const pitch = clip(p.pitch, 300) || writePitch(asVoice(agent.voice), job.brief, bid, label);
   const reasoning = [reason, clip(p.reasoning, 400)].filter(Boolean).join(" ");
+  // 'planned' until the producer decides which entries get made (greenlightRound).
   await db
     .prepare(
-      `UPDATE entries SET status = 'generating', gen_model = ?, gen_label = ?, cost_decision = ?, bid = ?, pitch = ?, reasoning = ?, gen_prompt = ?
+      `UPDATE entries SET status = 'planned', gen_model = ?, gen_label = ?, cost_decision = ?, bid = ?, pitch = ?, reasoning = ?, gen_prompt = ?
        WHERE id = ?`,
     )
-    .bind(maker.id, maker.label, thinking, bid, pitch, reasoning, prompt, cast.entryId)
+    .bind(maker.id, label, thinking, bid, pitch, reasoning, prompt, cast.entryId)
     .run();
-  return { go: true, makerId: maker.id, kind: maker.kind, prompt, take };
+  return { go: true, makerId: maker.id, kind: maker.kind, prompt, take, seconds };
 }
 
 const EXTENSIONS: Record<string, string> = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp", "image/svg+xml": "svg", "video/mp4": "mp4" };
@@ -603,13 +660,76 @@ async function store(env: AppEnv, jobId: string, entryId: string, bytes: ArrayBu
   return `/api/media/${jobId}/${entryId}.${ext}`;
 }
 
-async function finishEntry(db: D1Database, jobId: string, cast: Cast, maker: Maker, cost: number | null, deliverable: Deliverable): Promise<void> {
-  const spent = Math.max(0, cost ?? maker.estimate);
-  await postLedger(db, cast.agentId, "generation", -spent, jobId, `Hired ${maker.label}`, `${cast.entryId}:make`);
+async function finishEntry(db: D1Database, jobId: string, cast: Cast, maker: Maker, seconds: number, cost: number | null, deliverable: Deliverable): Promise<void> {
+  const billed = Math.max(0, cost ?? renderCost(maker, seconds));
+  const charged = houseRate(billed);
+  const note = HOUSE_MARKUP === 1 ? `Hired ${maker.label}` : `Hired ${maker.label} (billed $${billed.toFixed(3)} × ${HOUSE_MARKUP} house rate)`;
+  await postLedger(db, cast.agentId, "generation", -charged, jobId, note, `${cast.entryId}:make`);
   await db
-    .prepare("UPDATE entries SET status = 'ready', skip_reason = NULL, cost_generation = ?, deliverable_json = ? WHERE id = ?")
-    .bind(spent, JSON.stringify(deliverable), cast.entryId)
+    .prepare("UPDATE entries SET status = 'ready', skip_reason = NULL, cost_generation = ?, billed_generation = ?, deliverable_json = ? WHERE id = ?")
+    .bind(charged, billed, JSON.stringify(deliverable), cast.entryId)
     .run();
+}
+
+function mix(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  return hash >>> 0;
+}
+
+// The buyer's budget sets how many entries get made. When more agents pitch than that, the
+// producer ranks the pitches, seeing nothing else, and the top ones go to render.
+async function greenlightRound(env: AppEnv, jobId: string): Promise<string[]> {
+  const db = env.DB;
+  const job = await db.prepare("SELECT category, brief, offer_usd, status FROM jobs WHERE id = ?").bind(jobId).first<{ category: string; brief: string; offer_usd: number; status: string }>();
+  if (!job || job.status !== "casting" || !isCategory(job.category)) return [];
+  const rows = await db
+    .prepare("SELECT id, status, pitch FROM entries WHERE job_id = ? AND status IN ('planned', 'generating')")
+    .bind(jobId)
+    .all<{ id: string; status: string; pitch: string | null }>();
+  // A retried step keeps the decision it already wrote.
+  const decided = rows.results.filter((row) => row.status === "generating");
+  if (decided.length > 0) return decided.map((row) => row.id);
+  const slots = slotsFor(job.offer_usd);
+  if (rows.results.length <= slots) {
+    const ids = rows.results.map((row) => row.id);
+    if (ids.length > 0) await db.prepare(`UPDATE entries SET status = 'generating' WHERE id IN (${ids.map(() => "?").join(", ")})`).bind(...ids).run();
+    return ids;
+  }
+  // Order by a per-round hash so no seat is always "Pitch A".
+  const lineup = [...rows.results]
+    .sort((a, b) => mix(`${jobId}:${a.id}`) - mix(`${jobId}:${b.id}`))
+    .map((row, index) => ({ label: String.fromCharCode(65 + index), row }));
+  let ranked: { id: string; note: string }[];
+  let cost: number | null = null;
+  try {
+    const verdict = await greenlight(env, categoryLabel(job.category), job.brief, slots, lineup.map(({ label, row }) => ({ label, pitch: row.pitch ?? "" })));
+    cost = verdict.cost;
+    const seen = new Set<string>();
+    ranked = [];
+    for (const item of verdict.value.ranking ?? []) {
+      const letter = clip(item?.pitch, 20).toUpperCase().replace(/^PITCH\s+/, "");
+      const hit = lineup.find((entry) => entry.label === letter);
+      if (!hit || seen.has(hit.label)) continue;
+      seen.add(hit.label);
+      ranked.push({ id: hit.row.id, note: clip(item?.note, 120) });
+    }
+    for (const entry of lineup) if (!seen.has(entry.label)) ranked.push({ id: entry.row.id, note: "" });
+  } catch (error) {
+    log("producer_failed", { jobId, message: error instanceof Error ? error.message : "error" });
+    ranked = lineup.map(({ row }) => ({ id: row.id, note: "The producer was out, so this was drawn by lot." }));
+  }
+  const made = ranked.slice(0, slots);
+  const cut = ranked.slice(slots);
+  await db.batch([
+    ...made.map(({ id, note }) => db.prepare("UPDATE entries SET status = 'generating', producer_note = ? WHERE id = ? AND status = 'planned'").bind(note || null, id)),
+    ...cut.map(({ id, note }) => db
+      .prepare("UPDATE entries SET status = 'skipped', skip_reason = 'The producer passed on my pitch.', producer_note = ? WHERE id = ? AND status = 'planned'")
+      .bind(note || "Passed.", id)),
+    db.prepare("UPDATE jobs SET producer_cost = ? WHERE id = ?").bind(cost, jobId),
+  ]);
+  log("greenlit", { jobId, slots, pitched: lineup.length, cost });
+  return made.map(({ id }) => id);
 }
 
 async function failEntry(db: D1Database, jobId: string, cast: Cast, maker: Maker, error: unknown): Promise<void> {
@@ -628,12 +748,12 @@ async function makeEntry(env: AppEnv, jobId: string, cast: Cast, planned: Extrac
       const written = await write(env, maker.id, category, job.brief, planned.prompt);
       const deliverable = fromWriting(job.brief, written.value);
       if (!deliverable) throw new Error("The writer returned an empty piece.");
-      await finishEntry(db, jobId, cast, maker, written.cost, deliverable);
+      await finishEntry(db, jobId, cast, maker, 0, written.cost, deliverable);
       return;
     }
     const picture = await image(env, maker.id, planned.prompt, category === "asset" ? "1:1" : "3:4");
     const src = await store(env, jobId, cast.entryId, picture.value.bytes, picture.value.type);
-    await finishEntry(db, jobId, cast, maker, picture.cost, fromMedia(category, "image", src, planned.take, job.brief));
+    await finishEntry(db, jobId, cast, maker, 0, picture.cost, fromMedia(category, "image", src, planned.take, job.brief));
   } catch (error) {
     await failEntry(db, jobId, cast, maker, error);
   }
@@ -644,7 +764,8 @@ async function submitEntryVideo(env: AppEnv, jobId: string, cast: Cast, planned:
   const maker = makerFor(category, planned.makerId);
   if (!maker?.video) throw new Error("Video maker vanished from the menu.");
   try {
-    return await submitVideo(env, maker.id, planned.prompt, { ...maker.video, aspect: category === "standup" ? "9:16" : "16:9" });
+    const { resolution, audio } = maker.video;
+    return await submitVideo(env, maker.id, planned.prompt, { duration: planned.seconds, resolution, audio, aspect: category === "standup" ? "9:16" : "16:9" });
   } catch (error) {
     await failEntry(env.DB, jobId, cast, maker, error);
     return null;
@@ -658,16 +779,24 @@ async function storeEntryVideo(env: AppEnv, jobId: string, cast: Cast, planned: 
   try {
     if (state.status !== "completed") throw new Error(state.error ?? `Video ended ${state.status}`);
     const src = await store(env, jobId, cast.entryId, await downloadVideo(env, state), "video/mp4");
-    await finishEntry(env.DB, jobId, cast, maker, state.cost, fromMedia(category, "video", src, planned.take, job.brief));
+    await finishEntry(env.DB, jobId, cast, maker, planned.seconds, state.cost, fromMedia(category, "video", src, planned.take, job.brief));
   } catch (error) {
     await failEntry(env.DB, jobId, cast, maker, error);
   }
 }
 
-async function playAgent(env: AppEnv, jobId: string, cast: Cast, steps: Steps): Promise<void> {
+async function planAgent(env: AppEnv, jobId: string, cast: Cast, steps: Steps): Promise<Planned> {
   try {
-    const planned = await steps.do(`plan:${cast.agentId}`, () => planEntry(env, jobId, cast));
-    if (!planned.go) return;
+    return await steps.do(`plan:${cast.agentId}`, () => planEntry(env, jobId, cast));
+  } catch (error) {
+    log("agent_failed", { jobId, agentId: cast.agentId, message: error instanceof Error ? error.message : "error" });
+    await skipEntry(env.DB, cast.entryId, "Choked on the brief.");
+    return { go: false };
+  }
+}
+
+async function produceAgent(env: AppEnv, jobId: string, cast: Cast, planned: Extract<Planned, { go: true }>, steps: Steps): Promise<void> {
+  try {
     if (planned.kind !== "video") {
       await steps.do(`make:${cast.agentId}`, () => makeEntry(env, jobId, cast, planned));
       return;
@@ -687,58 +816,52 @@ async function playAgent(env: AppEnv, jobId: string, cast: Cast, steps: Steps): 
   }
 }
 
-async function houseEntry(db: D1Database, entryId: string, agent: AgentRow, job: JobRow, category: CategoryId): Promise<void> {
-  const voice = asVoice(agent.voice);
-  const model = MENU[category][0];
-  const reading = interpret(voice, category, model, job.brief);
-  const bid = cents(Math.min(job.offer_usd * 0.4, Math.max(0.25, priceBid(voice, model.cost, job.offer_usd))));
-  await db
-    .prepare(
-      `UPDATE entries SET status = 'ready', skip_reason = NULL, gen_model = ?, gen_label = ?, bid = ?, pitch = ?, deliverable_json = ?, reasoning = ?, gen_prompt = ?
-       WHERE id = ?`,
-    )
-    .bind(
-      model.id,
-      `House template (${model.label})`,
-      bid,
-      writePitch(voice, job.brief, bid, model),
-      JSON.stringify(produce(voice, category, model, job.brief, reading.take)),
-      `House rule: the room doesn't adjourn without a seller. The house comped a template. ${writeReasoning(voice, 0, job.offer_usd, model, 0, bid)}`,
-      reading.prompt,
-      entryId,
-    )
-    .run();
-}
-
 async function closeRound(env: AppEnv, jobId: string): Promise<void> {
   const db = env.DB;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job || job.status !== "casting" || !isCategory(job.category)) return;
-  await db.prepare("UPDATE entries SET status = 'skipped', skip_reason = 'Ran out of time.' WHERE job_id = ? AND status IN ('thinking', 'generating')").bind(jobId).run();
+  await db.prepare("UPDATE entries SET status = 'skipped', skip_reason = 'Ran out of time.' WHERE job_id = ? AND status IN ('thinking', 'planned', 'generating')").bind(jobId).run();
   const readyCount = await db.prepare("SELECT COUNT(*) AS n FROM entries WHERE job_id = ? AND status = 'ready'").bind(jobId).first<{ n: number }>();
   if (!readyCount || readyCount.n === 0) {
-    const rows = await entriesFor(db, jobId);
-    const ranked = await Promise.all(rows.map(async (row) => ({ row, balance: await balanceOf(db, row.agent_id) })));
-    ranked.sort((a, b) => b.balance - a.balance);
-    const richest = ranked[0];
-    const agent = richest ? await agentById(db, richest.row.agent_id) : null;
-    if (!richest || !agent) {
-      await db.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?").bind(jobId).run();
-      log("round_failed", { jobId, reason: "no agents" });
-      return;
-    }
-    await houseEntry(db, richest.row.id, agent, job, job.category);
+    await closeUnsold(env, job, job.category);
+    return;
   }
   const judged = await db.prepare("UPDATE jobs SET status = 'judging' WHERE id = ? AND status = 'casting'").bind(jobId).run();
   log("round_judging", { jobId });
   const started = Date.parse(job.round_started_at ?? job.created_at);
-  if (judged.meta.changes === 1 && Date.now() - started >= NOTIFY_AFTER_MS) await notifyOffersReady(env, jobId);
+  if (judged.meta.changes === 1 && Date.now() - started >= NOTIFY_AFTER_MS) await notifyRoundClosed(env, jobId, true);
+}
+
+// Nobody sold: release the buyer's hold and tell them no agent would take the job at that price.
+async function closeUnsold(env: AppEnv, job: JobRow, category: CategoryId): Promise<void> {
+  const db = env.DB;
+  if (job.mode === "paypal" && job.authorization_id && paypalReady(env)) {
+    // Before the status change, so a retried step voids again (idempotent) rather than never.
+    await voidAuthorization(env, job.authorization_id, job.id).catch((error: unknown) => {
+      log("paypal_void_failed", { jobId: job.id, message: error instanceof Error ? error.message : "error" });
+    });
+  }
+  const passed = await db.prepare("UPDATE jobs SET status = 'passed' WHERE id = ? AND status = 'casting'").bind(job.id).run();
+  if (passed.meta.changes !== 1) return;
+  log("round_passed", { jobId: job.id, offer: job.offer_usd });
+  if (Date.now() - Date.parse(job.round_started_at ?? job.created_at) >= NOTIFY_AFTER_MS) await notifyRoundClosed(env, job.id, false);
+  const lane = categoryLabel(category);
+  for (const row of await entriesFor(db, job.id)) {
+    const agent = await agentById(db, row.agent_id);
+    if (agent?.status === "alive") await saveJournal(db, agent, job.id, `Nobody sold ${lane} at $${job.offer_usd.toFixed(2)}. ${row.skip_reason ?? "I passed."}`);
+  }
+  await buryTheBroke(db);
 }
 
 export async function runRound(env: AppEnv, jobId: string, steps: Steps = inline, token = crypto.randomUUID()): Promise<void> {
   const cast = await steps.do("start", () => startRound(env, jobId, token));
   if (!cast) return;
-  await Promise.all(cast.map((seat) => playAgent(env, jobId, seat, steps)));
+  const plans = await Promise.all(cast.map((seat) => planAgent(env, jobId, seat, steps)));
+  const funded = new Set(await steps.do("greenlight", () => greenlightRound(env, jobId)));
+  await Promise.all(cast.map((seat, index) => {
+    const planned = plans[index];
+    return planned?.go && funded.has(seat.entryId) ? produceAgent(env, jobId, seat, planned, steps) : undefined;
+  }));
   await steps.do("close", () => closeRound(env, jobId));
 }
 
@@ -760,7 +883,13 @@ export function readJob(body: unknown): PostedJob {
   const rawOffer = typeof record.offer === "number" ? record.offer : typeof record.offer === "string" ? Number(record.offer) : NaN;
   if (!Number.isFinite(rawOffer)) throw new GameError("Set an offer.", 400);
   const offer = cents(rawOffer);
-  if (offer < 0.5 || offer > 5) throw new GameError("The offer stays between $0.50 and $5.00.", 400);
+  const min = offerMinFor(category);
+  if (offer > OFFER_MAX) throw new GameError(`The offer tops out at $${OFFER_MAX.toFixed(2)}.`, 400);
+  if (offer < min) {
+    throw new GameError(category === "video"
+      ? `Video starts at $${min.toFixed(2)}. Up to four agents may each render a clip, and clips are expensive.`
+      : `The offer starts at $${min.toFixed(2)}.`, 400);
+  }
   const mode = record.mode === "paypal" ? "paypal" : record.mode === "house" ? "house" : null;
   if (!mode) throw new GameError("Choose PayPal or the house tab.", 400);
   return { category, brief, offer, mode };
@@ -889,13 +1018,7 @@ export async function pickWinner(env: AppEnv, jobId: string, entryId: string, se
     await saveJournal(db, seller, jobId, note);
   }
 
-  const funerals: Funeral[] = [];
-  const names = usedNames(await db.prepare("SELECT name FROM agents").all<{ name: string }>().then((result) => result.results));
-  const fresh = await aliveAgents(db);
-  for (const living of fresh) {
-    const funeral = await buryIfBroke(db, living, names);
-    if (funeral) funerals.push(funeral);
-  }
+  const funerals = await buryTheBroke(db);
 
   const resolution: Resolution = {
     authorized: cents(job.offer_usd),
@@ -937,6 +1060,9 @@ async function publicEntry(row: EntryRow, agent: AgentRow | undefined, phase: "w
     genPrompt: books ? row.gen_prompt : null,
     costDecision: books ? Math.round(row.cost_decision * 10000) / 10000 : 0,
     costGeneration: books ? Math.round(row.cost_generation * 10000) / 10000 : 0,
+    billedGeneration: books && row.billed_generation != null ? Math.round(row.billed_generation * 10000) / 10000 : null,
+    // Hidden until the books open so the buyer judges the work, not the producer's opinion.
+    producerNote: books ? row.producer_note : null,
     bid: showOffer ? row.bid : null,
     pitch: showOffer ? row.pitch : null,
     deliverable: showOffer ? parseDeliverable(row.deliverable_json) : null,
@@ -947,7 +1073,7 @@ export async function jobView(env: AppEnv, jobId: string, sessionId: string | nu
   const db = env.DB;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
   if (!job) throw new GameError("That job isn't on the board.", 404);
-  const phase = job.status === "captured" ? "books" : job.status === "judging" || job.status === "capturing" ? "gallery" : "working";
+  const phase = job.status === "captured" || job.status === "passed" ? "books" : job.status === "judging" || job.status === "capturing" ? "gallery" : "working";
   const rows = await entriesFor(db, jobId);
   const agents = await db.prepare("SELECT * FROM agents").all<AgentRow>();
   const byId = new Map(agents.results.map((agent) => [agent.id, agent]));
@@ -965,6 +1091,7 @@ export async function jobView(env: AppEnv, jobId: string, sessionId: string | nu
       captureId: job.capture_id,
       createdAt: job.created_at,
       isOwner,
+      producerCost: phase === "books" ? job.producer_cost ?? null : null,
     },
     entries,
     resolution: job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null,
@@ -1407,7 +1534,9 @@ export function configView(env: AppEnv) {
     paypalClientId: readyPaypal ? env.PAYPAL_CLIENT_ID : null,
     paypalMode: paypalMode(env),
     offerMin: 0.5,
-    offerMax: 5,
+    offerMax: OFFER_MAX,
+    houseMarkup: HOUSE_MARKUP,
+    offerSlots: OFFER_SLOTS,
     categories: CATEGORIES,
     accessRequired: true,
     signInEnabled: emailConfigured(env),

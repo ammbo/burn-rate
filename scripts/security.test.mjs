@@ -17,7 +17,7 @@ await build({
   } }],
 });
 const { default: worker, ensureReady, runRound, reserveGeneration, hash, cleanup } = await import(join(directory, "worker.mjs"));
-let mf, env, pending, calls, emails;
+let mf, env, pending, calls, emails, planReply, producerReply;
 const realFetch = globalThis.fetch;
 
 function mediaBucket() {
@@ -36,10 +36,17 @@ async function openrouter(url, init) {
   const input = JSON.parse(init.body);
   calls.push({ path, model: input.model, input });
   if (path.endsWith("/images")) return Response.json({ data: [{ b64_json: "AAAA", media_type: "image/png" }], usage: { cost: 0.04 } });
+  if (path.endsWith("/videos")) return Response.json({ error: { message: "test render refused" } }, { status: 500 });
   const name = input.response_format.json_schema.name;
+  if (name === "greenlight") {
+    if (producerReply === "fail") return Response.json({ error: { message: "producer down" } }, { status: 500 });
+    const letters = [...input.messages.at(-1).content.matchAll(/^Pitch ([A-Z]):/gm)].map((match) => match[1]);
+    const ranking = (producerReply?.(letters) ?? letters).map((letter) => ({ pitch: letter, note: `Note for ${letter}.` }));
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ ranking }) } }], usage: { cost: 0.002 } });
+  }
   const content = name === "plan"
     ? { choice: input.messages.at(-1).content.match(/^- (\S+) \|/m)[1], reason: "Make something useful.", prompt: "Make a useful piece", take: "A clear idea",
-        pitch: "A useful piece for your brief.", bid: 1, notes: "Covers my costs." }
+        pitch: "A useful piece for your brief.", bid: 1, notes: "Covers my costs.", ...planReply?.(input) }
     : name === "artifact" ? { eyebrow: "Test", title: "A clear idea", lede: "Here is the idea.", points: [{ h: "Try", body: "A concrete next step." }] }
     : { title: "A bit", lines: ["One.", "Two.", "Three."], tag: "Done." };
   return Response.json({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { cost: 0.01 } });
@@ -49,6 +56,8 @@ beforeEach(async () => {
   mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: "export default { fetch() { return new Response('ok'); } }", d1Databases: { DB: crypto.randomUUID() }, compatibilityDate: "2026-10-07" }));
   calls = [];
   pending = [];
+  planReply = null;
+  producerReply = null;
   globalThis.fetch = async (url, init) => String(url).startsWith("https://openrouter.ai/") ? openrouter(url, init) : realFetch(url, init);
   emails = [];
   env = {
@@ -204,7 +213,7 @@ test("schema v2 invite sessions can finish old rounds and claim them only with t
 test("rounds run once; only their owner can authorize or select, and settlement retries do not double-credit", async () => {
   const owner = await login();
   const stranger = await login("203.0.113.2");
-  const { jobId } = await post(owner);
+  const { jobId } = await post(owner, { ...job, offer: 3 });
   await Promise.all([...pending, runRound(env, jobId), runRound(env, jobId)]);
   assert.equal(calls.length, 8, "four decisions and four makes, even with duplicate dispatch");
   const view = await (await request(`/api/jobs/${jobId}`, { cookie: owner })).json();
@@ -329,7 +338,7 @@ test("My projects lists only the signed-in owner's started rounds, with their al
   const mine = await (await request("/api/projects", { cookie: owner })).json();
   assert.deepEqual(mine.projects.map((project) => project.id), [jobId]);
   assert.equal(mine.projects[0].status, "judging");
-  assert.equal(mine.projects[0].offers, 4);
+  assert.equal(mine.projects[0].offers, 3, "a $2 budget makes three");
   assert.deepEqual({ used: mine.allowance.used, limit: mine.allowance.limit, remaining: mine.allowance.remaining }, { used: 1, limit: 3, remaining: 2 });
   assert.doesNotMatch(JSON.stringify(mine), /owner@example.com/);
   const theirs = await (await request("/api/projects", { cookie: stranger, ip: "203.0.113.2" })).json();
@@ -356,7 +365,7 @@ test("paused or unconfigured generation fails closed before any AI call", async 
 
 test("image rounds are bounded to four plan calls and four image calls, each on the agent's own model", async () => {
   const cookie = await login();
-  const { jobId } = await post(cookie, { ...job, category: "image" });
+  const { jobId } = await post(cookie, { ...job, category: "image", offer: 3 });
   await Promise.all(pending);
   const plans = calls.filter((call) => call.path.endsWith("/chat/completions"));
   assert.equal(plans.length, 4);
@@ -486,4 +495,138 @@ test("active sessions renew; a round that ran long emails its owner once", async
   const ready = emails.filter((email) => email.subject === "Your offers are ready");
   assert.equal(ready.length, 1);
   assert.match(ready[0].text, new RegExp(`https://burnrating.com/#/round/${slow}`));
+});
+
+test("the agents' prompt prices renders at the house rate and offers every render the wallet covers", async () => {
+  const cookie = await login();
+  await post(cookie, { ...job, category: "video", offer: 2 });
+  await Promise.all(pending);
+  const prompt = calls.find((call) => call.path.endsWith("/chat/completions")).input.messages;
+  const user = prompt.at(-1).content;
+  assert.match(prompt[0].content, /2× what the provider bills/);
+  assert.match(prompt[0].content, /Passing is a business decision/);
+  assert.match(user, /- google\/veo-3\.1-fast \| Veo 3\.1 Fast \| ~\$0\.200 per second: 4s ~\$0\.80, 6s ~\$1\.20, 8s ~\$1\.60 \|/);
+  assert.match(user, /- minimax\/hailuo-2\.3 \| Hailuo 2\.3 \| ~\$0\.163 per second: 6s ~\$0\.98, 10s ~\$1\.63 \|/);
+  assert.match(user, /At this budget up to 3 entries get made/);
+  assert.match(prompt[0].content, /reads only your pitch: never your prompt, model, price, or name/);
+  // A $4 wallet covers 4 seconds of Veo 3.1 at the house rate, but not 6 or 8.
+  assert.match(user, /- google\/veo-3\.1 \| Veo 3\.1 \| ~\$0\.800 per second: 4s ~\$3\.20 \|/);
+  assert.match(user, /Bidding under your cost is allowed/);
+  const low = await request("/api/jobs", { method: "POST", body: { ...job, category: "video", offer: 1.5 }, cookie });
+  assert.equal(low.status, 400);
+  assert.match((await low.json()).error, /Video starts at \$2\.00/);
+  // A render priced above the budget is still on the menu: agents may sell it at a loss.
+  await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 300000).run();
+  calls.length = 0;
+  await post(cookie, { ...job, category: "standup", offer: 0.5 });
+  await Promise.all(pending);
+  assert.match(calls.find((call) => call.path.endsWith("/chat/completions")).input.messages.at(-1).content, /- google\/veo-3\.1-fast \| Veo 3\.1 Fast tape \| ~\$0\.200 per second: 4s ~\$0\.80, 6s ~\$1\.20, 8s ~\$1\.60 \|/);
+});
+
+test("renders are charged at the house rate, and agents may bid under cost", async () => {
+  planReply = () => ({ choice: "google/gemini-3-pro-image", bid: 0.01 });
+  const cookie = await login();
+  const { jobId } = await post(cookie, { ...job, category: "image", offer: 3 });
+  await Promise.all(pending);
+  const entry = await env.DB.prepare("SELECT bid, cost_generation, billed_generation, reasoning FROM entries WHERE job_id = ? AND status = 'ready' LIMIT 1").bind(jobId).first();
+  assert.equal(entry.billed_generation, 0.04);
+  assert.equal(entry.cost_generation, 0.08);
+  // Far under its $0.01 thinking + $0.28 house-rate cost; only the $0.05 minimum price applies.
+  assert.equal(entry.bid, 0.05);
+  assert.doesNotMatch(entry.reasoning, /floor/i);
+  const charged = await env.DB.prepare("SELECT SUM(amount_usd) AS n FROM wallet_ledger WHERE type = 'generation' AND ref = ?").bind(jobId).first();
+  assert.equal(Math.round(charged.n * 100) / 100, -0.32);
+});
+
+test("the producer picks finalists from the pitches alone when more agents pitch than the budget makes", async () => {
+  planReply = (input) => {
+    const name = input.messages[0].content.match(/^You are ([^,]+),/)[1];
+    return { pitch: `A pitch from the seat called ${name.split(" ")[1]}.`, prompt: `SECRET-PROMPT ${name}`, bid: 0.77 };
+  };
+  producerReply = (letters) => [...letters].reverse();
+  const cookie = await login();
+  const { jobId } = await post(cookie, { ...job, category: "image", offer: 1 });
+  await Promise.all(pending);
+  const producer = calls.filter((call) => call.input?.response_format?.json_schema?.name === "greenlight");
+  assert.equal(producer.length, 1);
+  assert.equal(producer[0].model, "mistralai/mistral-large-4-0");
+  const seen = JSON.stringify(producer[0].input.messages);
+  assert.match(seen, /You can greenlight 2 of these 4 pitches/);
+  for (const hidden of ["SECRET-PROMPT", "0.77", "gpt-image", "Ada Ledger", "Rex Close", "anthropic/"]) assert.ok(!seen.includes(hidden), hidden);
+  assert.equal(calls.filter((call) => call.path.endsWith("/images")).length, 2);
+  const view = await (await request(`/api/jobs/${jobId}`, { cookie })).json();
+  assert.equal(view.entries.filter((entry) => entry.status === "ready").length, 2);
+  const cut = view.entries.filter((entry) => entry.status === "skipped");
+  assert.equal(cut.length, 2);
+  assert.ok(view.entries.every((entry) => entry.producerNote === null && entry.skipReason === null), "verdicts stay hidden until the books open");
+  const rows = (await env.DB.prepare("SELECT status, skip_reason, producer_note FROM entries WHERE job_id = ?").bind(jobId).all()).results;
+  assert.ok(rows.every((row) => /^Note for [A-D]\.$/.test(row.producer_note)));
+  assert.ok(rows.filter((row) => row.status === "skipped").every((row) => row.skip_reason === "The producer passed on my pitch."));
+  assert.equal((await env.DB.prepare("SELECT producer_cost FROM jobs WHERE id = ?").bind(jobId).first()).producer_cost, 0.002);
+  const history = calls.filter((call) => call.path.endsWith("/chat/completions")).length;
+  assert.equal(history, 5, "four pitches and one producer call");
+});
+
+test("if the producer is unavailable, finalists are drawn by lot; at a budget that makes everyone, it isn't called", async () => {
+  producerReply = "fail";
+  const cookie = await login();
+  const { jobId } = await post(cookie, { ...job, category: "image", offer: 1 });
+  await Promise.all(pending);
+  const rows = (await env.DB.prepare("SELECT status, producer_note FROM entries WHERE job_id = ?").bind(jobId).all()).results;
+  assert.equal(rows.filter((row) => row.status === "ready").length, 2);
+  assert.ok(rows.every((row) => /drawn by lot/.test(row.producer_note)));
+  await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 300000).run();
+  calls.length = 0;
+  await post(cookie, { ...job, category: "image", offer: 3 });
+  await Promise.all(pending);
+  assert.equal(calls.filter((call) => call.input?.response_format?.json_schema?.name === "greenlight").length, 0);
+  assert.equal(calls.filter((call) => call.path.endsWith("/images")).length, 4);
+});
+
+test("agents choose a video length; it is priced per second and snapped to what the model allows", async () => {
+  const asks = { "Ada Ledger": 6, "Rex Close": 7, "Nia Cut": 0, "Jules Static": 99 };
+  planReply = (input) => ({ choice: "google/veo-3.1-lite", seconds: asks[input.messages[0].content.match(/^You are ([^,]+),/)[1]] });
+  const cookie = await login();
+  const { jobId } = await post(cookie, { ...job, category: "video", offer: 3 });
+  await Promise.all(pending);
+  const lengths = calls.filter((call) => call.path.endsWith("/videos")).map((call) => call.input.duration).sort();
+  // 6 as asked, 7 rounds to 6 (ties go short), 0 defaults to the shortest, 99 is capped at the longest.
+  assert.deepEqual(lengths, [4, 6, 6, 8]);
+  assert.ok(calls.filter((call) => call.path.endsWith("/videos")).every((call) => call.input.resolution === "720p" && call.input.generate_audio === true));
+  const labels = (await env.DB.prepare("SELECT gen_label FROM entries WHERE job_id = ?").bind(jobId).all()).results.map((row) => row.gen_label).sort();
+  assert.deepEqual(labels, ["Veo 3.1 Lite · 4s", "Veo 3.1 Lite · 6s", "Veo 3.1 Lite · 6s", "Veo 3.1 Lite · 8s"]);
+});
+
+test("when every agent passes, the round closes unsold, the hold is voided, and nobody can be paid", async () => {
+  planReply = () => ({ choice: "skip", reason: "Not at this price.", bid: 0 });
+  const paypal = mockPaypal();
+  try {
+    const cookie = await login();
+    const { jobId, orderId } = await post(cookie, { ...job, mode: "paypal" });
+    assert.equal((await request(`/api/jobs/${jobId}/authorize`, { method: "POST", body: { orderId }, cookie })).status, 200);
+    await Promise.all(pending);
+    const view = await (await request(`/api/jobs/${jobId}`, { cookie })).json();
+    assert.equal(view.job.status, "passed");
+    assert.ok(view.entries.every((entry) => entry.status === "skipped" && entry.skipReason === "Not at this price." && entry.name));
+    assert.equal(paypal.paypalCalls.filter((call) => call.path.endsWith("/test-authorization/void")).length, 1);
+    assert.equal(paypal.paypalCalls.filter((call) => call.path.endsWith("/capture")).length, 0);
+    const entryId = view.entries[0].id;
+    assert.equal((await request(`/api/jobs/${jobId}/winner`, { method: "POST", body: { entryId }, cookie })).status, 409);
+    assert.equal(calls.filter((call) => !call.path.endsWith("/chat/completions")).length, 0, "no renders");
+    const mine = await (await request("/api/projects", { cookie })).json();
+    assert.equal(mine.projects[0].status, "passed");
+    const journal = (await env.DB.prepare("SELECT journal_md FROM agents WHERE id = 'ada'").first()).journal_md;
+    assert.match(journal, /Nobody sold Artifact at \$2\.00\. Not at this price\./);
+  } finally { paypal.restore(); }
+});
+
+test("an agent with nothing it could sell at a profit passes without paying for a thinking call", async () => {
+  await env.DB.prepare("INSERT INTO wallet_ledger (id, agent_id, ts, type, amount_usd, ref, note) SELECT 'drain-' || id, id, ?, 'fee', -3.95, 'test', 'drain' FROM agents").bind(new Date().toISOString()).run();
+  const cookie = await login();
+  const { jobId } = await post(cookie, { ...job, category: "video", offer: 2 });
+  await Promise.all(pending);
+  assert.equal(calls.length, 0);
+  const view = await (await request(`/api/jobs/${jobId}`, { cookie })).json();
+  assert.equal(view.job.status, "passed");
+  assert.ok(view.entries.every((entry) => /wallet can't cover a video render/.test(entry.skipReason)));
 });

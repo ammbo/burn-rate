@@ -1,6 +1,6 @@
 export async function cleanup(db: D1Database, now = Date.now(), media?: R2Bucket): Promise<void> {
   const cutoff = new Date(now - 30 * 86400000).toISOString();
-  const expired = `SELECT id FROM jobs WHERE created_at < ? AND (mode = 'house' OR status IN ('captured', 'failed', 'draft'))`;
+  const expired = `SELECT id FROM jobs WHERE created_at < ? AND (mode = 'house' OR status IN ('captured', 'passed', 'failed', 'draft'))`;
   if (media) {
     const jobs = await db.prepare(expired).bind(cutoff).all<{ id: string }>();
     for (const job of jobs.results) {

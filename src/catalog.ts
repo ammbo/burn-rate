@@ -2,12 +2,29 @@ export const OFFER_MIN = 0.5;
 export const OFFER_MAX = 5;
 export const DEATH_LINE = 0.1;
 export const STAKE = 4;
+// Agents pay this multiple of what OpenRouter bills for a render, so every price carries margin.
+// Thinking is charged at cost.
+export const HOUSE_MARKUP: number = 2;
+// The buyer's budget decides how many entries get made. If more agents pitch than that,
+// the producer picks which, reading only the pitches.
+export const OFFER_SLOTS = [
+  { from: 0.5, slots: 2 },
+  { from: 1.5, slots: 3 },
+  { from: 3, slots: 4 },
+] as const;
+// An impartial judge: a model family no seat runs on.
+export const PRODUCER_MODEL = "mistralai/mistral-large-4-0";
+
+export function slotsFor(offer: number): number {
+  return OFFER_SLOTS.reduce((slots, step) => (offer >= step.from - 1e-9 ? step.slots : slots), OFFER_SLOTS[0].slots as number);
+}
 
 export const CATEGORIES = [
   {
     id: "image",
     label: "Image",
     kicker: "Still",
+    min: OFFER_MIN,
     suggestion: 1.5,
     blurb: "One picture. A poster, a still, a thing you can look at.",
     placeholder: "A movie poster for a diner that only serves breakfast during thunderstorms",
@@ -16,6 +33,8 @@ export const CATEGORIES = [
     id: "video",
     label: "Video",
     kicker: "Clip",
+    // Up to four agents may render a clip; below this, nobody can cover a render with margin.
+    min: 2,
     suggestion: 4,
     blurb: "A short generated clip, up to eight seconds.",
     placeholder: "Eight seconds of a raccoon opening a tiny briefcase",
@@ -24,6 +43,7 @@ export const CATEGORIES = [
     id: "artifact",
     label: "Artifact",
     kicker: "Page",
+    min: OFFER_MIN,
     suggestion: 2,
     blurb: "A one-page document or a short deck someone can hand off.",
     placeholder: "A one-page strategy for a bookstore that stays open all night and judges you",
@@ -32,6 +52,7 @@ export const CATEGORIES = [
     id: "asset",
     label: "Asset",
     kicker: "Mark",
+    min: OFFER_MIN,
     suggestion: 1.5,
     blurb: "A logo, a wordmark, a palette. Something the brand can keep.",
     placeholder: "A logo for a toothpaste that tells the truth",
@@ -40,6 +61,7 @@ export const CATEGORIES = [
     id: "standup",
     label: "Stand-up",
     kicker: "Mic",
+    min: OFFER_MIN,
     suggestion: 2,
     blurb: "A bit, or a comedy tape. The funniest seller gets the money.",
     placeholder: "A tight five about dating someone who narrates their life like a nature documentary",
@@ -49,21 +71,26 @@ export const CATEGORIES = [
 export type CategoryId = (typeof CATEGORIES)[number]["id"];
 export type Voice = "deadpan" | "closer" | "cutter" | "mic";
 
-export interface GenModel {
-  id: string;
-  label: string;
-  cost: number;
-}
-
 export type MakerKind = "text" | "image" | "video";
 
 export interface Maker {
   id: string;
   label: string;
   kind: MakerKind;
+  /** Provider cost of the cheapest version; for video, the shortest clip. */
   estimate: number;
   note: string;
-  video?: { duration: number; resolution?: string; audio?: boolean };
+  video?: { durations: number[]; perSecond: number; resolution?: string; audio?: boolean };
+}
+
+// Per-second prices and lengths from OpenRouter's video model list. Agents choose the length.
+function clip(id: string, label: string, perSecond: number, durations: number[], note: string, spec: { resolution?: string; audio?: boolean } = {}): Maker {
+  return { id, label, kind: "video", estimate: perSecond * Math.min(...durations), note, video: { durations, perSecond, ...spec } };
+}
+
+/** Provider cost of a render; video is priced per second of the chosen length. */
+export function renderCost(maker: Maker, seconds = 0): number {
+  return maker.video ? maker.video.perSecond * seconds : maker.estimate;
 }
 
 const WRITERS: Maker[] = [
@@ -74,8 +101,8 @@ const WRITERS: Maker[] = [
 ];
 
 const TAPES: Maker[] = [
-  { id: "google/veo-3.1-lite", label: "Veo 3.1 Lite tape", kind: "video", estimate: 0.4, note: "8s, 720p, with sound. A comedian delivering one line.", video: { duration: 8, resolution: "720p", audio: true } },
-  { id: "google/veo-3.1-fast", label: "Veo 3.1 Fast tape", kind: "video", estimate: 0.8, note: "8s, 720p, with sound. Better performance.", video: { duration: 8, resolution: "720p", audio: true } },
+  clip("google/veo-3.1-lite", "Veo 3.1 Lite tape", 0.05, [4, 6, 8], "720p, with sound. A comedian delivering one line.", { resolution: "720p", audio: true }),
+  clip("google/veo-3.1-fast", "Veo 3.1 Fast tape", 0.1, [4, 6, 8], "720p, with sound. Better performance.", { resolution: "720p", audio: true }),
 ];
 
 export const MAKERS: Record<CategoryId, Maker[]> = {
@@ -89,12 +116,12 @@ export const MAKERS: Record<CategoryId, Maker[]> = {
     { id: "google/gemini-3-pro-image", label: "Nano Banana Pro", kind: "image", estimate: 0.14, note: "Top quality, best for posters with text." },
   ],
   video: [
-    { id: "x-ai/grok-imagine-video-1.5-lite", label: "Grok Imagine Video Lite", kind: "video", estimate: 0.12, note: "6s, 480p, silent. Cheap and rough.", video: { duration: 6, resolution: "480p" } },
-    { id: "google/veo-3.1-lite", label: "Veo 3.1 Lite", kind: "video", estimate: 0.4, note: "8s, 720p, with sound.", video: { duration: 8, resolution: "720p", audio: true } },
-    { id: "kwaivgi/kling-v3.0-std", label: "Kling 3.0 Standard", kind: "video", estimate: 0.42, note: "5s, silent, strong motion.", video: { duration: 5, resolution: "720p", audio: false } },
-    { id: "minimax/hailuo-2.3", label: "Hailuo 2.3", kind: "video", estimate: 0.49, note: "6s, silent, cinematic.", video: { duration: 6 } },
-    { id: "google/veo-3.1-fast", label: "Veo 3.1 Fast", kind: "video", estimate: 0.8, note: "8s, 720p, with sound. High quality.", video: { duration: 8, resolution: "720p", audio: true } },
-    { id: "google/veo-3.1", label: "Veo 3.1", kind: "video", estimate: 3.2, note: "8s, with sound. The best clip money buys here.", video: { duration: 8, audio: true } },
+    clip("x-ai/grok-imagine-video-1.5-lite", "Grok Imagine Video Lite", 0.02, [4, 6, 8, 10], "480p, silent. Cheap and rough.", { resolution: "480p" }),
+    clip("google/veo-3.1-lite", "Veo 3.1 Lite", 0.05, [4, 6, 8], "720p, with sound.", { resolution: "720p", audio: true }),
+    clip("kwaivgi/kling-v3.0-std", "Kling 3.0 Standard", 0.084, [4, 6, 8, 10], "720p, silent, strong motion.", { resolution: "720p", audio: false }),
+    clip("minimax/hailuo-2.3", "Hailuo 2.3", 0.0817, [6, 10], "Silent, cinematic. Only 6 or 10 seconds."),
+    clip("google/veo-3.1-fast", "Veo 3.1 Fast", 0.1, [4, 6, 8], "720p, with sound. High quality.", { resolution: "720p", audio: true }),
+    clip("google/veo-3.1", "Veo 3.1", 0.4, [4, 6, 8], "With sound. The best clip money buys here.", { audio: true }),
   ],
   artifact: WRITERS,
   asset: [
@@ -110,36 +137,14 @@ export function makerFor(category: CategoryId, id: string): Maker | undefined {
   return MAKERS[category].find((maker) => maker.id === id);
 }
 
-export const MENU: Record<CategoryId, GenModel[]> = {
-  image: [
-    { id: "sketch", label: "Ink sketch", cost: 0.06 },
-    { id: "poster", label: "Print poster", cost: 0.18 },
-    { id: "hero", label: "Hero still", cost: 0.42 },
-  ],
-  video: [
-    { id: "animatic", label: "Animatic", cost: 0.12 },
-    { id: "clip", label: "8-second clip", cost: 0.95 },
-  ],
-  artifact: [
-    { id: "memo", label: "One-page memo", cost: 0.08 },
-    { id: "deck", label: "Short deck", cost: 0.28 },
-  ],
-  asset: [
-    { id: "mark", label: "Wordmark", cost: 0.07 },
-    { id: "kit", label: "Mini kit", cost: 0.24 },
-  ],
-  standup: [
-    { id: "bit", label: "Written bit", cost: 0.05 },
-    { id: "tape", label: "Comedy tape", cost: 0.7 },
-  ],
-};
+/** What an agent's wallet is charged for a render that OpenRouter bills at `billed`. */
+export function houseRate(billed: number): number {
+  return Math.round(billed * HOUSE_MARKUP * 10000) / 10000;
+}
 
-export const DECISION_COST: Record<Voice, number> = {
-  deadpan: 0.03,
-  closer: 0.09,
-  cutter: 0.06,
-  mic: 0.02,
-};
+export function offerMinFor(category: CategoryId): number {
+  return CATEGORIES.find((item) => item.id === category)?.min ?? OFFER_MIN;
+}
 
 export interface Seat {
   id?: string;
@@ -265,44 +270,6 @@ export function cents(value: number): number {
 export function clampMoney(value: number, min: number, max: number): number {
   const amount = cents(value);
   return Math.min(cents(max), Math.max(cents(min), amount));
-}
-
-export function pickModel(voice: Voice, category: CategoryId, balance: number, offer: number): GenModel | null {
-  const decision = DECISION_COST[voice];
-  const affordable = MENU[category].filter((model) => balance >= cents(decision + model.cost));
-  if (affordable.length === 0) return null;
-  if (voice === "mic") return affordable[0];
-  if (voice === "deadpan") {
-    const sensible = affordable.filter((model) => model.cost <= offer * 0.5);
-    return (sensible.length > 0 ? sensible : affordable)[0];
-  }
-  if (voice === "closer") {
-    const flex = [...affordable].reverse().find((model) => model.cost * 1.8 <= offer);
-    return flex ?? affordable[affordable.length - 1];
-  }
-  return affordable[affordable.length - 1];
-}
-
-export function priceBid(voice: Voice, totalCost: number, offer: number): number {
-  let bid = totalCost;
-  if (voice === "deadpan") bid = totalCost * 1.9;
-  if (voice === "closer") bid = Math.max(totalCost * 1.35, offer * 0.84);
-  if (voice === "cutter") bid = Math.max(totalCost * 2.05, offer * 0.45);
-  if (voice === "mic") bid = Math.min(totalCost * 0.92, offer * 0.34);
-  return clampMoney(bid, Math.min(0.05, offer), offer);
-}
-
-export function wantsToSkip(voice: Voice, category: CategoryId, balance: number, model: GenModel, offer: number): string | null {
-  if (voice === "mic" && category === "video" && balance < 3) {
-    return "Video burns a wallet. I'll heckle from the cheap seats.";
-  }
-  if (voice === "deadpan" && category === "video" && model.cost > balance * 0.4) {
-    return "That clip is priced like a personality. I don't have one to spare.";
-  }
-  if (voice === "closer" && model.cost > offer * 0.72) {
-    return "No room above cost. I'm not working for the lesson.";
-  }
-  return null;
 }
 
 export function categoryLabel(id: CategoryId): string {

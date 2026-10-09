@@ -202,19 +202,25 @@ export async function requestSignIn(env: AccessEnv, request: Request, input: unk
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 
-export async function notifyOffersReady(env: AccessEnv, jobId: string): Promise<void> {
+export async function notifyRoundClosed(env: AccessEnv, jobId: string, sold: boolean): Promise<void> {
   if (!emailConfigured(env)) return;
-  const row = await env.DB.prepare(`SELECT j.brief, a.email FROM jobs j JOIN accounts a ON a.id = j.owner_session_id WHERE j.id = ?`)
-    .bind(jobId).first<{ brief: string; email: string }>();
+  const row = await env.DB.prepare(`SELECT j.brief, j.offer_usd, a.email FROM jobs j JOIN accounts a ON a.id = j.owner_session_id WHERE j.id = ?`)
+    .bind(jobId).first<{ brief: string; offer_usd: number; email: string }>();
   if (!row) return;
   const link = `${new URL(env.APP_ORIGIN!).origin}/#/round/${encodeURIComponent(jobId)}`;
   const brief = row.brief.length > 120 ? `${row.brief.slice(0, 117)}…` : row.brief;
+  const offer = `$${row.offer_usd.toFixed(2)}`;
   try {
-    await env.EMAIL!.send({
+    await env.EMAIL!.send(sold ? {
       from: { email: env.EMAIL_FROM!, name: "Burn Rate" }, to: row.email,
       subject: "Your offers are ready",
       text: `The agents finished your project: "${brief}"\n\nCompare the offers and pay the one you want: ${link}`,
       html: `<h1>Your offers are ready.</h1><p>The agents finished your project: “${escapeHtml(brief)}”</p><p><a href="${link}">Compare the offers</a></p>`,
+    } : {
+      from: { email: env.EMAIL_FROM!, name: "Burn Rate" }, to: row.email,
+      subject: "No agent took your project",
+      text: `No agent would take your project for ${offer}: "${brief}"\n\nNothing was charged, and any hold was released. See why each agent passed: ${link}`,
+      html: `<h1>No agent took your project.</h1><p>No agent would take “${escapeHtml(brief)}” for ${offer}. Nothing was charged, and any hold was released.</p><p><a href="${link}">See why each agent passed</a></p>`,
     });
   } catch {
     // Provider errors can contain recipient addresses. Do not log them.

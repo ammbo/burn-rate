@@ -145,10 +145,10 @@ const entryKind = (type) =>
   ({ stake: "Stake", decision_tokens: "Thinking", generation: "Making", win: "Paid for a job", will: "Will", fee: "Fee" })[type] || type;
 
 const outcomeLabel = (outcome) =>
-  ({ won: "Won", lost: "Lost", skipped: "Sat out", open: "Waiting on the buyer", failed: "Round broke" })[outcome] || outcome;
+  ({ won: "Won", lost: "Lost", skipped: "Sat out", cut: "Not greenlit", open: "Waiting on the buyer", failed: "Round broke" })[outcome] || outcome;
 
 const jobStatusLabel = (status) =>
-  ({ casting: "Being made", judging: "Waiting on the buyer", captured: "Paid", failed: "Broke" })[status] || status;
+  ({ casting: "Being made", judging: "Waiting on the buyer", captured: "Paid", passed: "No takers", failed: "Broke" })[status] || status;
 
 const laneName = (id) =>
   ({ image: "Image", video: "Video clip", artifact: "Memo / deck", asset: "Logo", standup: "Comedy bit" })[id] || id;
@@ -428,9 +428,12 @@ async function drawArena(selected = "image") {
         <p class="hint" id="brief-hint"></p>
         <label class="offer">
           <span>Maximum budget</span>
-          <strong id="offer-read">${usd(draft?.offer || lane?.suggestion || 2)}</strong>
-          <input id="offer" type="range" min="0.5" max="5" step="0.05" value="${draft?.offer || lane?.suggestion || 2}" aria-label="Maximum budget" />
+          <strong id="offer-read">${usd(Math.max(lane?.min || 0.5, draft?.offer || lane?.suggestion || 2))}</strong>
+          <input id="offer" type="range" min="${lane?.min || 0.5}" max="5" step="0.05" value="${Math.max(lane?.min || 0.5, draft?.offer || lane?.suggestion || 2)}" aria-label="Maximum budget" aria-describedby="slot-live" />
         </label>
+        <ol class="slot-steps" aria-hidden="true">${(config?.offerSlots || []).map((step, index, all) => `
+          <li data-from="${step.from}"><b>${step.slots}</b> offers<span>${all[index + 1] ? `${usd(step.from)}+` : `${usd(step.from).replace(".00", "")} and up`}</span></li>`).join("")}</ol>
+        <p class="sr-only" id="slot-live" aria-live="polite"></p>
         <p class="fine" id="fine"></p>
         <div class="actions">
           ${paypal ? `<div id="paypal-checkout"></div>` : ""}
@@ -507,7 +510,10 @@ function wireAsk(lanes, paypal) {
     offerRead.textContent = usd(offer.value);
     const hold = holds ? "PayPal authorizes" : "The house tab simulates holding";
     const funds = config?.paypalMode === "sandbox" ? " in test funds" : "";
-    fine.textContent = `${hold} ${usd(offer.value)}${funds}. You pay only the offer you pick; the rest is released.`;
+    const lane = lanes.find((item) => item.id === document.querySelector("input[name=lane]:checked")?.value);
+    const floor = lane && lane.min > 0.5 ? ` ${laneName(lane.id)} starts at ${usd(lane.min)}, since each agent may render one.` : "";
+    fine.textContent = `${hold} ${usd(offer.value)}${funds}. Your budget sets how many agents get to make it; if more pitch, an impartial producer picks which. You pay only the offer you pick, and nothing if no agent takes it.${floor}`;
+    showSlots(Number(offer.value), lane?.min || 0.5);
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
     checkoutError("");
@@ -525,8 +531,9 @@ function wireAsk(lanes, paypal) {
       if (!next) return;
       brief.placeholder = next.placeholder;
       blurb.textContent = laneBlurb(next.id);
-      if (!touched) {
-        offer.value = String(next.suggestion);
+      offer.min = String(next.min);
+      if (!touched || Number(offer.value) < next.min) {
+        offer.value = String(Math.max(next.min, touched ? next.min : next.suggestion));
       }
       sync();
     });
@@ -535,13 +542,36 @@ function wireAsk(lanes, paypal) {
   if (paypal) mountPaypal().catch(() => checkoutError("PayPal checkout is unavailable right now. You can still use simulated checkout."));
 }
 
+// Lights the budget tier the slider is in; the number "jumps" when it crosses a threshold.
+function showSlots(offer, min) {
+  const steps = [...document.querySelectorAll(".slot-steps li")];
+  const active = steps.filter((step) => offer >= Number(step.dataset.from) - 1e-9).pop();
+  steps.forEach((step) => {
+    const next = step.nextElementSibling;
+    step.classList.toggle("off", Boolean(next && Number(next.dataset.from) <= min));
+    if (step === active && !step.classList.contains("on")) {
+      step.classList.remove("bump");
+      void step.offsetWidth;
+      step.classList.add("bump");
+    }
+    step.classList.toggle("on", step === active);
+  });
+  const live = document.querySelector("#slot-live");
+  const count = active?.querySelector("b")?.textContent;
+  if (live && count && live.dataset.count !== count) {
+    live.dataset.count = count;
+    live.textContent = `Up to ${count} agents will make it.`;
+  }
+}
+
 function readForm() {
   const category = document.querySelector("input[name=lane]:checked")?.value;
   const brief = document.querySelector("#brief").value.trim();
   const offer = Math.round(Number(document.querySelector("#offer").value) * 100) / 100;
   if (!category) return { error: "Pick what kind of thing you want." };
   if (brief.length < 12) return { error: "Give them at least 12 characters." };
-  if (offer < 0.5 || offer > 5) return { error: "Set a maximum budget between $0.50 and $5.00." };
+  const min = config?.categories?.find((lane) => lane.id === category)?.min || 0.5;
+  if (offer < min || offer > 5) return { error: `Set a maximum budget between ${usd(min)} and $5.00.` };
   return { category, brief, offer };
 }
 
@@ -629,6 +659,7 @@ const PROJECT_GROUPS = [
   { status: "judging", title: "Ready for your pick", note: "The offers are in. Nothing is captured until you choose." },
   { status: "casting", title: "Being made", note: "The agents are working. This page updates on its own." },
   { status: "captured", title: "Settled", note: "Paid, with the books open" },
+  { status: "passed", title: "No takers", note: "No agent would do it at that price; nothing was charged" },
   { status: "failed", title: "Stopped", note: "The round broke; nothing was captured" },
 ];
 
@@ -637,6 +668,7 @@ function projectRowHTML(project) {
     judging: [`${project.offers} ${project.offers === 1 ? "offer" : "offers"} · you held ${usd(project.offer)}`, "Pick a winner"],
     casting: [`${project.finished} of ${project.seen || 4} agents done · you held ${usd(project.offer)}`, "Being made"],
     captured: [`Paid ${usd(project.paid)} of ${usd(project.offer)} to ${esc(project.winnerName || "the winner")}`, "Paid"],
+    passed: [`No agent took it for ${usd(project.offer)} · nothing charged`, "No takers"],
     failed: [`Held ${usd(project.offer)} · nothing captured`, "Stopped"],
   }[project.status] || [`Held ${usd(project.offer)}`, jobStatusLabel(project.status)];
   return `<a class="job-row project-row" href="#/round/${esc(project.id)}" data-status="${esc(project.status)}">
@@ -825,12 +857,40 @@ function lessonCopy(entries, winnerAgentId, category, isOwner) {
   return taste + price + made + promptNote;
 }
 
+const FAILURE = /render failed|didn't answer|Choked|Ran out of time/;
+
+function unsoldCopy(job, entries) {
+  const failed = entries.filter((entry) => FAILURE.test(entry.skipReason || "")).length;
+  const charged = job.mode === "paypal" ? "Nothing was charged, and PayPal released the hold." : "Nothing was charged.";
+  const why = failed ? `No offers came back for ${usd(job.offer)}.` : `No agent was willing to do this job for ${usd(job.offer)}.`;
+  const below = failed ? " Below is what happened to each agent." : " Below is why each one passed.";
+  return `${why} ${charged}${job.isOwner ? below : ""}`;
+}
+
+function retryHTML(job) {
+  const lane = config?.categories?.find((item) => item.id === job.category);
+  const next = Math.min(5, Math.max(lane?.min || 0.5, Math.ceil(job.offer * 1.5 * 20) / 20));
+  return next > job.offer
+    ? `<p><button type="button" class="post-link" id="retry-higher" data-offer="${next}">Try again at ${usd(next)}</button></p>`
+    : `<p class="fine">That was already the top budget. Try a simpler brief or a cheaper format.</p>`;
+}
+
+// What providers actually billed for the round versus what the buyer paid. Older rounds
+// predate billing records, so the line only appears when every render has one.
+function houseLineHTML(entries, paid, producer) {
+  if (entries.some((entry) => entry.status === "ready" && entry.billedGeneration == null)) return "";
+  const billed = producer + entries.reduce((sum, entry) => sum + (entry.costDecision || 0) + (entry.billedGeneration || 0), 0);
+  const net = paid - billed;
+  if (!paid && billed < 0.005) return `<p class="fine house-line">No provider was billed: every agent passed before spending anything.</p>`;
+  return `<p class="fine house-line">Providers billed ${usd(billed)} for this round: the agents' thinking and renders${producer ? ", plus the producer" : ""}. ${paid ? `The buyer paid ${usd(paid)}, so the house ${net >= 0 ? "kept" : "lost"} ${usd(Math.abs(net))}.` : `Nobody paid, so the house covered it.`}</p>`;
+}
+
 async function drawRound(id) {
   if (!id) throw new Error("Missing round.");
   document.title = "Round · Burn Rate";
   const data = await api(`/api/jobs/${id}`);
   const job = data.job;
-  const books = job.status === "captured";
+  const books = job.status === "captured" || job.status === "passed";
   const ready = data.entries.filter((entry) => entry.status === "ready").sort((a, b) => orderKey(a.id) - orderKey(b.id));
   const skipped = data.entries.filter((entry) => entry.status === "skipped");
   const resolution = data.resolution;
@@ -870,8 +930,9 @@ async function drawRound(id) {
       </article>`).join("")}</div>`
       : `<p class="empty">Nobody put work up.</p>`;
   } else {
-    kicker = `${kicker} · The books`;
-    lede = lessonCopy(ready, resolution?.winnerId, job.category, job.isOwner);
+    const passed = job.status === "passed";
+    kicker = `${kicker} · ${passed ? "No takers" : "The books"}`;
+    lede = passed ? unsoldCopy(job, skipped) : lessonCopy(ready, resolution?.winnerId, job.category, job.isOwner);
     const everyone = [...ready, ...skipped];
     const lines = everyone.map((entry) => {
       const thinking = entry.costDecision || 0;
@@ -879,7 +940,7 @@ async function drawRound(id) {
       const won = resolution && resolution.winnerId === entry.agentId;
       const paid = won ? resolution.captured : 0;
       const net = paid - thinking - making;
-      const result = entry.status === "skipped" ? "skipped" : won ? "won" : "lost";
+      const result = entry.status === "skipped" ? (entry.producerNote ? "cut" : "skipped") : won ? "won" : "lost";
       return { entry, thinking, making, paid, net, result };
     });
     const sum = (key) => lines.reduce((total, line) => total + line[key], 0);
@@ -889,7 +950,7 @@ async function drawRound(id) {
         <tr class="row-link" data-href="#/agent/${entry.agentId}">
           <td><a href="#/agent/${entry.agentId}"><strong>${esc(entry.name)}</strong></a><br><span class="mono">${esc(entry.model)}</span></td>
           <td>${entry.genLabel && result !== "skipped" ? esc(entry.genLabel) : `<span class="muted">—</span>`}</td>
-          <td><span class="outcome" data-outcome="${result}">${esc(outcomeLabel(result))}</span>${result === "skipped" && entry.skipReason ? `<br><span class="muted">${esc(entry.skipReason)}</span>` : ""}</td>
+          <td><span class="outcome" data-outcome="${result}">${esc(outcomeLabel(result))}</span>${result === "skipped" && entry.skipReason ? `<br><span class="muted">${esc(entry.skipReason)}</span>` : ""}${entry.producerNote ? `<br><span class="muted">Producer: “${esc(entry.producerNote)}”</span>` : ""}</td>
           <td class="num">${usd(thinking)}</td>
           <td class="num">${usd(making)}</td>
           <td class="num">${entry.bid == null ? "—" : usd(entry.bid)}</td>
@@ -898,8 +959,11 @@ async function drawRound(id) {
         </tr>`).join("")}</tbody>
       <tfoot><tr><td colspan="3">The room</td><td class="num">${usd(sum("thinking"))}</td><td class="num">${usd(sum("making"))}</td><td></td><td class="num">${usd(sum("paid"))}</td><td class="num ${tone(sum("net"))}">${signed(sum("net"))}</td></tr></tfoot>
     </table></div>`;
-    body = `<div class="section-head"><h2>Breakdown</h2><p>What each agent spent and made on this job</p></div>
+    const markup = config?.houseMarkup > 1 ? ` Renders are charged at the house rate, ${config.houseMarkup}× what the provider billed.` : "";
+    body = `${passed && job.isOwner ? retryHTML(job) : ""}
+    <div class="section-head"><h2>${passed ? "Why they passed" : "Breakdown"}</h2><p>${passed ? "What each agent spent deciding" : `What each agent spent and made on this job.${markup}`}</p></div>
     ${breakdown}
+    ${houseLineHTML(everyone, passed ? 0 : resolution?.captured || 0, job.producerCost || 0)}
     <div class="grid gallery">${ready.map((entry) => {
       const spent = (entry.costDecision || 0) + (entry.costGeneration || 0);
       const won = resolution && resolution.winnerId === entry.agentId;
@@ -914,6 +978,7 @@ async function drawRound(id) {
         <p class="spent">Spent ${usd(spent)} making it</p>
         ${entry.genPrompt ? `<p class="prompt-label">The prompt</p><pre class="prompt">${esc(entry.genPrompt)}</pre>` : ""}
         ${entry.pitch ? `<p class="pitch">${esc(entry.pitch)}</p>` : ""}
+        ${entry.producerNote ? `<p class="producer-note">Producer: “${esc(entry.producerNote)}”</p>` : ""}
       </article>`;
     }).join("")}</div>`;
   }
@@ -938,6 +1003,10 @@ async function drawRound(id) {
     ${body}
   `, "");
   wirePlayers();
+  document.querySelector("#retry-higher")?.addEventListener("click", (event) => {
+    saveProjectDraft({ category: job.category, brief: job.brief, offer: Number(event.currentTarget.dataset.offer) });
+    location.hash = `#/post/${job.category}`;
+  });
   document.querySelectorAll(".pay").forEach((button) => {
     button.addEventListener("click", async () => {
       const entryId = button.dataset.entry;

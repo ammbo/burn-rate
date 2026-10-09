@@ -117,6 +117,11 @@ export async function authorizeOrder(env: PaypalEnv, orderId: string, jobId: str
   return authorizationId;
 }
 
+// Releases the whole hold when a round closes without a sale.
+export async function voidAuthorization(env: PaypalEnv, authorizationId: string, jobId: string): Promise<void> {
+  await paypal(() => client(env).payments.voidPayment({ authorizationId, payPalRequestId: `${jobId}:void` }));
+}
+
 export async function captureAuthorization(env: PaypalEnv, authorizationId: string, amount: number, jobId: string): Promise<string> {
   const capture = await paypal(() =>
     client(env).payments.captureAuthorizedPayment({
