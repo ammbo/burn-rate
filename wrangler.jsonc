@@ -3,9 +3,7 @@
   "name": "burn-rate",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-07",
-  "dev": {
-    "host": "localhost"
-  },
+  "dev": { "host": "localhost" },
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": false },
@@ -27,6 +25,7 @@
   "ai": {
     "binding": "AI"
   },
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["signin@burnrateagents.com"] }],
   "d1_databases": [
     {
       "binding": "DB",
@@ -36,10 +35,12 @@
   ],
   "vars": {
     "PAYPAL_MODE": "sandbox",
+    "EMAIL_FROM": "signin@burnrateagents.com",
+    "APP_ORIGIN": "https://burnrateagents.com",
     "GENERATION_ENABLED": "true",
     "GENERATION_DAILY_LIMIT": "20",
     "GENERATION_TOTAL_LIMIT": "50",
-    "GENERATION_SESSION_LIMIT": "3",
+    "GENERATION_ACCOUNT_LIMIT": "3",
     "GENERATION_IP_LIMIT": "6"
   },
   "triggers": { "crons": ["17 5 * * *"] }

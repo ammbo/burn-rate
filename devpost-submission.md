@@ -1,5 +1,7 @@
 # Burn Rate
 
+> October 9 update: email-link account access is implemented locally but not deployed. The invite-based judge instructions below describe the existing live build. Update them from `docs/account-sign-in.md` only after rollout and real email verification.
+
 Draft prepared October 8, 2026 from the actual implementation and the submission form pasted by the operator. Devpost's requirements MCP returned an internal error, so this document does not certify a fresh official rules check. Nothing was submitted or edited on Devpost.
 
 ## One-line Summary

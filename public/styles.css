@@ -60,10 +60,17 @@ button { cursor: pointer; }
   padding: 10px 16px;
 }
 .hero { padding: 42px 0 12px; max-width: 740px; }
+.contest-hero { max-width: 960px; padding-top: 48px; }
+.contest-hero h1 { line-height: 1.04; }
+.hero-stakes { color: var(--ink); font-size: 18px; line-height: 1.5; max-width: 50ch; }
+.hero-formats { color: var(--muted); font-size: 14px; line-height: 1.7; }
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; margin: 24px 0 12px; }
+.hero-actions .post-link { margin-left: 0; }
+.watch-link { color: var(--gold); text-underline-offset: 4px; }
 .round-hero { max-width: 920px; padding-top: 28px; }
 .round-hero h1 { font-size: clamp(28px, 4vw, 46px); line-height: 1.12; overflow-wrap: break-word; }
-.ask { padding-top: 32px; }
-.ask h1 { font-size: clamp(44px, 6vw, 72px); margin-bottom: 18px; }
+.ask { padding-top: 36px; scroll-margin-top: 24px; }
+.ask h2 { font-size: clamp(32px, 4vw, 46px); margin: 0 0 18px; }
 .ask form { display: flex; flex-direction: column; gap: 8px; }
 .brief-box {
   width: 100%;
@@ -457,7 +464,7 @@ td.num, th.num { text-align: right; font-family: "IBM Plex Mono", monospace; whi
 .how-summary { margin-top: 46px; padding-top: 12px; border-top: 1px solid var(--line); }
 .how-summary .section-head { align-items: center; }
 .how-summary .section-head a { font-size: 14px; color: var(--gold); white-space: nowrap; }
-.how-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; list-style: none; padding: 0; margin: 24px 0; }
+.how-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; list-style: none; padding: 0; margin: 24px 0; }
 .how-steps .mono { color: var(--gold); font-size: 11px; }
 .how-steps h3 { font-size: 21px; margin: 12px 0 8px; }
 .how-steps p { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0; }
@@ -488,10 +495,18 @@ td.num, th.num { text-align: right; font-family: "IBM Plex Mono", monospace; whi
 }
 
 @media (max-width: 900px) {
+  .contest-hero h1 { font-size: clamp(36px, 7.5vw, 68px); }
+  .how-steps { grid-template-columns: repeat(2, 1fr); }
   .agents, .lanes, .grid, .stage, .profile, .graves { grid-template-columns: 1fr; }
   .job-row, .receipt-row { grid-template-columns: 1fr; }
   .bar { flex-wrap: wrap; }
   .post-link { margin-left: 0; }
+}
+
+@media (max-width: 600px) {
+  .contest-hero { padding-top: 32px; }
+  .contest-hero h1 { font-size: clamp(32px, 8.3vw, 48px); }
+  .how-steps { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -501,5 +516,7 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 fieldset:disabled { opacity: .6; }
 .access-form { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--line, #665344); border-radius: .6rem; }
 .access-form label { display: block; font-weight: 600; }
+.access-form h3 { margin: 0; font-size: 1.4rem; }
+.ask fieldset { display: flex; flex-direction: column; gap: 12px; }
 .access-form .actions { flex-direction: row; flex-wrap: wrap; align-items: stretch; }
 .access-form input { flex: 1 1 180px; min-width: 0; max-width: 28rem; background: var(--bg-2); border: 1px solid var(--line); padding: .8rem; border-radius: .3rem; }

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { GameError } from "./errors";
-import { assertSameOrigin, requireSession, reserveGeneration, sessionFor, signIn, signOut } from "./access";
+import { accountView, assertSameOrigin, confirmSignIn, requestSignIn, requireAccount, requireSession, reserveGeneration, sessionFor, signOut } from "./access";
 import { cleanup } from "./retention";
 import {
   agentView,
@@ -58,10 +58,15 @@ app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/config", (c) => c.json(configView(c.env)));
 
-app.get("/api/session", async (c) => c.json({ authenticated: Boolean(await sessionFor(c.env, c.req.raw)) }));
-app.post("/api/session", async (c) => {
-  const body = await c.req.json<{ code?: unknown }>().catch(() => null);
-  c.header("Set-Cookie", await signIn(c.env, c.req.raw, body?.code));
+app.get("/api/session", async (c) => c.json(await accountView(c.env, c.req.raw)));
+app.post("/api/session/email", async (c) => {
+  const body = await c.req.json<{ email?: unknown }>().catch(() => null);
+  c.header("Set-Cookie", await requestSignIn(c.env, c.req.raw, body?.email));
+  return c.json({ sent: true });
+});
+app.post("/api/session/verify", async (c) => {
+  const body = await c.req.json<{ token?: unknown }>().catch(() => null);
+  for (const cookie of await confirmSignIn(c.env, c.req.raw, body?.token)) c.header("Set-Cookie", cookie, { append: true });
   return c.json({ authenticated: true });
 });
 app.post("/api/session/logout", async (c) => {
@@ -80,7 +85,7 @@ app.get("/api/agents/:id", async (c) => c.json(await agentView(c.env, c.req.para
 app.get("/api/jobs/:id", async (c) => c.json(await jobView(c.env, c.req.param("id"), await sessionFor(c.env, c.req.raw))));
 
 app.post("/api/jobs", async (c) => {
-  const sessionId = await requireSession(c.env, c.req.raw);
+  const sessionId = await requireAccount(c.env, c.req.raw);
   const posted = readJob(await c.req.json().catch(() => null));
   const jobId = crypto.randomUUID();
   await reserveGeneration(c.env, c.req.raw, sessionId, jobId);

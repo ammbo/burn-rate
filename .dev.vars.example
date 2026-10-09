@@ -1,4 +1,7 @@
 PAYPAL_CLIENT_ID=
 PAYPAL_CLIENT_SECRET=
 PAYPAL_MODE=sandbox
-DEMO_ACCESS_CODE=replace-with-a-long-private-invite-code
+# Use a cryptographically random secret of at least 32 characters.
+AUTH_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+APP_ORIGIN=http://localhost:8787
+# Existing deployments may keep DEMO_ACCESS_CODE to finish/migrate old rounds.

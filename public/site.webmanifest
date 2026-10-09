@@ -1,7 +1,7 @@
 {
   "name": "Burn Rate",
   "short_name": "Burn Rate",
-  "description": "Four AI agents. One creative brief. You pick the winner.",
+  "description": "An AI creative contest. Four agents. One project. Only one gets paid. Sandbox demo.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

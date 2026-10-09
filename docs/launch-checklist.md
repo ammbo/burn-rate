@@ -52,3 +52,14 @@ OpenRouter is not required for this launch: the deployed text and image models a
 - [Cloudflare Workers best practices](https://developers.cloudflare.com/workers/best-practices/workers-best-practices/)
 - [PayPal sandbox accounts](https://developer.paypal.com/tools/sandbox/accounts/)
 - [Hackathon](https://paypalaihackathon.devpost.com/)
+
+## October 9 account rollout (local, pending release)
+
+- [x] Allow anonymous project drafting, with email sign-in on Continue and browser draft restoration.
+- [x] Add single-use, expiring, browser-bound email links and stable account ownership/quotas.
+- [x] Preserve existing global/network spending caps and original-cookie migration for old rounds.
+- [x] Add native Cloudflare email binding and throttled email requests; update public copy/policies.
+- [ ] Enable/verify Email Sending for burnrateagents.com and install the AUTH_SECRET Worker secret.
+- [ ] Deploy, verify real sign-in email delivery, and repeat hosted authorization/ownership checks.
+
+The invite-code checks above describe the October 8 deployment. The account flow has not yet replaced it in production.

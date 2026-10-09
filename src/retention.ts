@@ -8,6 +8,8 @@ export async function cleanup(db: D1Database, now = Date.now()): Promise<void> {
     db.prepare(`DELETE FROM jobs WHERE id IN (${expired})`).bind(cutoff),
     db.prepare("DELETE FROM access_sessions WHERE expires_at <= ?").bind(now),
     db.prepare("DELETE FROM access_attempts WHERE expires_at <= ?").bind(now),
+    db.prepare("DELETE FROM login_links WHERE expires_at <= ?").bind(now),
+    db.prepare("DELETE FROM email_requests WHERE created_at <= ?").bind(now - 86400000),
     // Keep reservation rows for the lifetime cap, but discard old browser/IP hashes.
     db.prepare("UPDATE generation_requests SET session_id = '', ip_hash = '' WHERE created_at < ?").bind(now - 7 * 86400000),
   ]);

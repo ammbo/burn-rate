@@ -1,4 +1,4 @@
-import { footerHTML, sandboxHTML, howHTML, homeDescription } from "/site-content.js";
+import { footerHTML, heroHTML, sandboxHTML, howHTML, homeTitle, homeDescription } from "/site-content.js";
 
 const app = document.querySelector("#app");
 const fallbackHTML = app.innerHTML;
@@ -7,6 +7,83 @@ let poll = 0;
 let paypalPromise = null;
 let config = null;
 let authenticated = false;
+const DRAFT_KEY = "burn-rate-project-v1";
+let memoryDraft = null;
+
+function projectDraft() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY));
+    if (saved && typeof saved.brief === "string" && saved.brief.length <= 400 &&
+        ["image", "video", "artifact", "asset", "standup"].includes(saved.category) &&
+        Number.isFinite(saved.offer) && saved.offer >= 0.5 && saved.offer <= 5 &&
+        saved.updatedAt > Date.now() - 86400000) return saved;
+    localStorage.removeItem(DRAFT_KEY);
+  } catch { /* Keep the in-memory draft when browser storage is unavailable. */ }
+  return memoryDraft?.updatedAt > Date.now() - 86400000 ? memoryDraft : null;
+}
+
+function saveProjectDraft(draft) {
+  memoryDraft = { ...draft, updatedAt: Date.now() };
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(memoryDraft)); } catch { /* The current form remains editable. */ }
+}
+
+function clearProjectDraft() {
+  memoryDraft = null;
+  try { localStorage.removeItem(DRAFT_KEY); } catch { /* Storage may be disabled. */ }
+}
+
+function emailFormHTML() {
+  return `<form id="email-form" class="access-form">
+    <h3>Sign in to start your project</h3>
+    <p class="fine" id="email-hint">We’ll email you a sign-in link. No password; your first sign-in creates your account. Your email stays private.</p>
+    <label for="sign-in-email">Email address</label>
+    <div class="actions"><input id="sign-in-email" type="email" autocomplete="email" maxlength="254" required aria-describedby="email-hint" /><button type="submit" class="house">Email me a sign-in link</button></div>
+    <p class="fine">Open the link in this browser. It expires in 15 minutes. <a href="/privacy">Privacy</a></p>
+    <p id="email-status" class="fine" role="status" aria-live="polite"></p>
+  </form>`;
+}
+
+function wireEmailForm() {
+  document.querySelector("#email-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector("button");
+    const status = document.querySelector("#email-status");
+    button.disabled = true;
+    try {
+      await api("/api/session/email", { method: "POST", body: JSON.stringify({ email: document.querySelector("#sign-in-email").value }) });
+      status.textContent = "Check your inbox for a sign-in link. Your project draft will be waiting here. You can close this tab after opening the link.";
+      button.textContent = "Send another link";
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+}
+
+async function drawSignIn(token) {
+  document.title = "Sign in · Burn Rate";
+  // Remove the secret from the address bar before any third-party SDK can load.
+  if (token) history.replaceState(null, "", "#/sign-in");
+  app.innerHTML = shell(`<section class="ask">
+    <h1>${token ? "Your project is waiting." : "Welcome to Burn Rate."}</h1>
+    ${token ? `<p class="lede">Sign in to continue. Your project won’t be submitted until you choose a checkout option.</p><button type="button" class="house" id="confirm-sign-in">Sign in</button><p id="confirm-status" class="fine" role="status" aria-live="polite"></p>` : ""}
+    <div id="new-link" ${token ? "hidden" : ""}>${emailFormHTML()}</div>
+    <p><a href="#/post/image">Back to your project</a></p>
+  </section>`, "");
+  wireEmailForm();
+  document.querySelector("#confirm-sign-in")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api("/api/session/verify", { method: "POST", body: JSON.stringify({ token }) });
+      authenticated = true;
+      location.hash = `#/post/${projectDraft()?.category || "image"}`;
+      toast("Signed in. Review your project, then choose a checkout option.");
+    } catch (error) {
+      document.querySelector("#confirm-status").textContent = error.message;
+      document.querySelector("#new-link").hidden = false;
+      document.querySelector("#sign-in-email").focus();
+    }
+  });
+}
 
 const usd = (value) => {
   const amount = Number(value) || 0;
@@ -45,7 +122,10 @@ const jobStatusLabel = (status) =>
   ({ casting: "Being made", judging: "Waiting on the buyer", captured: "Paid", failed: "Broke" })[status] || status;
 
 const laneName = (id) =>
-  ({ image: "Image", video: "Video", artifact: "Artifact", asset: "Asset", standup: "Stand-up" })[id] || id;
+  ({ image: "Image", video: "Storyboard", artifact: "Memo / deck", asset: "Brand kit", standup: "Comedy bit" })[id] || id;
+
+const laneBlurb = (id) =>
+  ({ image: "A generated still, poster, or illustration.", video: "An eight-second storyboard shown as timed frames. No rendered video file.", artifact: "A one-page memo or short deck, displayed in your browser.", asset: "A wordmark or mini brand kit with a palette and usage notes.", standup: "A written comedy bit, sometimes paired with storyboard frames. No recorded performance." })[id] || "";
 
 function toast(message) {
   toastEl.textContent = message;
@@ -76,9 +156,10 @@ function shell(main, active) {
         <a href="#/ledger" class="${active === "ledger" ? "on" : ""}">Ledger</a>
         <a href="/how-it-works">How it works</a>
       </nav>
-      <a class="post-link" href="#/post/image">Put up a job</a>
+      ${authenticated ? `<button type="button" class="house ghost" id="sign-out">Sign out</button>` : `<a href="#/sign-in">Sign in</a>`}
+      <a class="post-link" href="#/post/image">Start a project</a>
     </header>
-    <main id="main-content" tabindex="-1">${sandboxHTML}${main}</main>
+    <main id="main-content" tabindex="-1">${active === "arena" ? "" : sandboxHTML}${main}</main>
     ${footerHTML}
   </div>`;
 }
@@ -105,6 +186,7 @@ function route() {
     agent: () => drawAgent(parts[1]),
     graveyard: () => drawGraveyard(),
     ledger: () => drawLedger(),
+    "sign-in": () => drawSignIn(parts[1]),
   }[name];
   if (!go) {
     document.title = "Page not found · Burn Rate";
@@ -118,27 +200,28 @@ function route() {
 }
 
 async function drawArena(selected = "image") {
-  document.title = "Burn Rate — Four AI agents. One creative brief.";
+  document.title = homeTitle;
   app.innerHTML = shell(`<p class="loading">Checking the wallets…</p>`, "arena");
   const [data, session] = await Promise.all([api("/api/arena"), api("/api/session")]);
   authenticated = session.authenticated;
+  const draft = projectDraft();
   const lanes = config?.categories || [];
-  const current = lanes.some((lane) => lane.id === selected) ? selected : "image";
+  const current = draft?.category || (lanes.some((lane) => lane.id === selected) ? selected : "image");
   const lane = lanes.find((item) => item.id === current) || lanes[0];
   const paypal = Boolean(config?.paypal && authenticated && config?.generationEnabled);
   const chips = lanes.map((item) => `
     <label class="chip">
       <input type="radio" name="lane" value="${item.id}" ${item.id === current ? "checked" : ""} />
-      ${esc(item.label)}
+      ${esc(laneName(item.id))}
     </label>`).join("");
   const agents = data.agents.map((agent) => `
     <a class="agent" data-voice="${esc(agent.voice)}" href="#/agent/${agent.id}">
-      <div class="agent-top"><span class="model">${esc(agent.model)}</span><span class="balance">${usd(agent.balance)}</span></div>
+      <div class="agent-top"><span class="model">Bankroll</span><span class="balance">${usd(agent.balance)}</span></div>
       <h2>${esc(agent.name)}</h2>
       <p class="tag">${esc(agent.tagline)}</p>
       <dl class="record">
         <div><dt>Won</dt><dd>${agent.wins}</dd></div>
-        <div><dt>Sold</dt><dd>${agent.entries}</dd></div>
+        <div><dt>Offers</dt><dd>${agent.entries}</dd></div>
         <div><dt>Earned</dt><dd>${usd(agent.earnings)}</dd></div>
       </dl>
     </a>`).join("");
@@ -167,38 +250,40 @@ async function drawArena(selected = "image") {
       </a>`).join("")}</div>`
     : `<p class="empty">Everybody's still solvent. Give it a few bad bids.</p>`;
   app.innerHTML = shell(`
-    <section class="ask" id="ask">
-      <p class="kicker">Four agents. One brief. You pick the winner.</p>
-      <h1>What do you want?</h1>
-      <p class="lede arena-lede">Give four AI agents a creative brief and a budget up to $5. Compare the work, the price, and the pitch. Pick one, then open the books.</p>
+    ${heroHTML}
+    ${sandboxHTML}
+    <section class="ask" id="ask" aria-labelledby="brief-heading">
+      <h2 id="brief-heading">Start a project.</h2>
+      <p class="lede arena-lede">Choose a format, describe what you want, and set your maximum budget.</p>
       ${authenticated
-        ? `<p class="fine">Demo access is active in this browser. Up to ${esc(config.generationLimits.session)} new rounds per day; shared limits also apply. <button type="button" class="house ghost" id="sign-out">Sign out</button></p>`
-        : `<form id="access-form" class="access-form"><label for="invite-code">Demo invite code</label><p class="fine" id="access-hint">Posting is limited to invited testers. You can explore public rounds below.</p><div class="actions"><input id="invite-code" type="password" autocomplete="off" maxlength="256" required aria-describedby="access-hint" /><button type="submit" class="house">Unlock demo</button></div><p id="access-status" class="fine" role="status" aria-live="polite"></p></form>`}
+        ? `<p class="fine">Signed in as ${esc(session.email)}. Up to ${esc(config.generationLimits.account)} new rounds per account per day; shared limits also apply.</p>`
+        : `<p class="fine">Write your project first. We’ll ask you to sign in by email when you’re ready to continue.</p>`}
       ${config?.generationEnabled ? "" : `<p class="banner">New generations are paused. Explore the public rounds below.</p>`}
       <form id="job-form">
-        <fieldset ${authenticated && config?.generationEnabled ? "" : "disabled"}>
-        <label class="sr-only" for="brief">Your creative brief</label>
-        <textarea id="brief" class="brief-box" maxlength="400" aria-describedby="brief-hint brief-privacy" placeholder="${esc(lane?.placeholder || "")}"></textarea>
+        <fieldset>
+        <label for="brief">What should the agents make?</label>
+        <textarea id="brief" class="brief-box" maxlength="400" aria-describedby="brief-hint brief-privacy" placeholder="${esc(lane?.placeholder || "")}">${esc(draft?.brief || "")}</textarea>
         <p class="hint" id="brief-hint"></p>
-        <p class="fine">This build is entered in the PayPal + AI hackathon and uses sandbox test funds.</p><p class="fine" id="brief-privacy">Briefs and rounds are public. Leave out personal or confidential information. By posting, you agree to the <a href="/terms">terms</a>; see <a href="/privacy">privacy</a>.</p>
+        <p class="fine">This build is entered in the PayPal + AI hackathon and uses sandbox test funds.</p><p class="fine" id="brief-privacy">Submitted projects and rounds are public. Leave out personal or confidential information. By submitting, you agree to the <a href="/terms">terms</a>; see <a href="/privacy">privacy</a>. Your draft is saved in this browser and restored for up to 24 hours.</p>
         <div class="chips" role="radiogroup" aria-label="Kind of work">${chips}</div>
-        <p class="blurb" id="lane-blurb">${esc(lane?.blurb || "")}</p>
+        <p class="blurb" id="lane-blurb">${esc(laneBlurb(current))}</p>
         <label class="offer">
-          <span>Your bid</span>
-          <strong id="offer-read">${usd(lane?.suggestion || 2)}</strong>
-          <input id="offer" type="range" min="0.5" max="5" step="0.05" value="${lane?.suggestion || 2}" aria-label="Your bid" />
+          <span>Maximum budget</span>
+          <strong id="offer-read">${usd(draft?.offer || lane?.suggestion || 2)}</strong>
+          <input id="offer" type="range" min="0.5" max="5" step="0.05" value="${draft?.offer || lane?.suggestion || 2}" aria-label="Maximum budget" />
         </label>
         <p class="fine" id="fine"></p>
         <div class="actions">
           ${paypal ? `<div id="paypal-checkout"></div><p id="paypal-status" class="fine" role="status" aria-live="polite"></p>` : ""}
-          <button class="house ${paypal ? "ghost" : ""}" type="button" id="house">${paypal ? "Or hold it on the house tab" : "Hold it on the house tab"}</button>
+          ${authenticated ? `<button class="house ${paypal ? "ghost" : ""}" type="button" id="house" ${config?.generationEnabled ? "" : "disabled"}>${paypal ? "Or start with simulated checkout" : "Start with simulated checkout"}</button>` : `<button class="house" type="submit" id="continue-project">Continue</button>`}
         </div>
         ${config?.paypal ? "" : `<p class="fine">Sandbox keys aren't in this room, so the house holds the bid and records the capture here.</p>`}
         </fieldset>
       </form>
+      <div id="project-sign-in" hidden>${emailFormHTML()}</div>
     </section>
-    <div class="section-head"><h2>The room</h2><p>Burned ${usd(data.stats.burned)} · paid ${usd(data.stats.paid)}</p></div>
-    <p class="fine">Four personalities on a shared AI backend. Seat labels are characters; wallets use game prices. <a href="/how-it-works">Meet the mechanics.</a></p>
+    <div class="section-head"><h2>Meet the competitors</h2><p>Game costs ${usd(data.stats.burned)} · sales ${usd(data.stats.paid)}</p></div>
+    <p class="fine">Four personalities with separate bankrolls and strategies, all using the same text model. They spend to compete and earn only when chosen. Under $0.10 after a settled round, an agent retires and a challenger takes its seat. <a href="/how-it-works#agents">How the agents work.</a></p>
     <div class="agents">${agents}</div>
     <div class="section-head"><h2>On the board</h2><p>Jobs in motion</p></div>
     <div class="jobs">${live}</div>
@@ -207,26 +292,22 @@ async function drawArena(selected = "image") {
     ${graves}
     ${howHTML}
   `, "arena");
-  document.querySelector("#access-form")?.addEventListener("submit", async (event) => {
+  document.querySelector("#job-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const button = event.currentTarget.querySelector("button");
-    button.disabled = true;
-    try {
-      await api("/api/session", { method: "POST", body: JSON.stringify({ code: document.querySelector("#invite-code").value }) });
-      await drawArena(current);
-    } catch (error) {
-      document.querySelector("#access-status").textContent = error.message;
-      button.disabled = false;
-    }
+    if (authenticated) return;
+    const posted = readForm();
+    if (posted.error) return toast(posted.error);
+    saveProjectDraft(posted);
+    document.querySelector("#project-sign-in").hidden = false;
+    document.querySelector("#sign-in-email").focus();
+    document.querySelector("#project-sign-in").scrollIntoView({ block: "center", behavior: "smooth" });
   });
-  document.querySelector("#sign-out")?.addEventListener("click", async () => {
-    try {
-      await api("/api/session/logout", { method: "POST", body: "{}" });
-      await drawArena(current);
-    } catch (error) { toast(error.message); }
-  });
+  wireEmailForm();
   wireAsk(lanes);
-  if ((location.hash || "").startsWith("#/post")) document.querySelector("#brief")?.focus();
+  if ((location.hash || "").startsWith("#/post")) {
+    document.querySelector("#brief")?.focus({ preventScroll: true });
+    document.querySelector("#ask")?.scrollIntoView({ block: "start" });
+  }
 }
 
 function wireAsk(lanes) {
@@ -236,15 +317,16 @@ function wireAsk(lanes) {
   const brief = document.querySelector("#brief");
   const hint = document.querySelector("#brief-hint");
   const blurb = document.querySelector("#lane-blurb");
-  const paypal = Boolean(config?.paypal);
-  let touched = false;
+  const paypal = Boolean(config?.paypal && authenticated && config?.generationEnabled);
+  let touched = Boolean(projectDraft());
   const sync = () => {
     offerRead.textContent = usd(offer.value);
     const hold = paypal ? "PayPal authorizes" : "The house tab simulates holding";
     const funds = config?.paypalMode === "sandbox" ? " in test funds" : "";
-    fine.textContent = `${hold} ${usd(offer.value)}${funds}. Each agent sets a price in the dark, then you see each offer next to the work. Pick one to capture its price and release the unused authorization.`;
+    fine.textContent = `${hold} ${usd(offer.value)}${funds}. Compare the completed work, prices, and pitches with agent identities hidden. Choose one winner to capture only its price and release the rest. There is no reject-all option.`;
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
+    saveProjectDraft({ category: document.querySelector("input[name=lane]:checked").value, brief: brief.value, offer: Number(offer.value) });
   };
   sync();
   offer.addEventListener("input", () => {
@@ -257,14 +339,14 @@ function wireAsk(lanes) {
       const next = lanes.find((item) => item.id === input.value);
       if (!next) return;
       brief.placeholder = next.placeholder;
-      blurb.textContent = next.blurb;
+      blurb.textContent = laneBlurb(next.id);
       if (!touched) {
         offer.value = String(next.suggestion);
-        sync();
       }
+      sync();
     });
   });
-  document.querySelector("#house").addEventListener("click", () => submitHouse());
+  document.querySelector("#house")?.addEventListener("click", () => submitHouse());
   if (paypal) mountPaypal().catch(() => {
     const status = document.querySelector("#paypal-status");
     if (status) status.textContent = "PayPal checkout is unavailable right now. You can still try the house tab with simulated payments.";
@@ -277,7 +359,7 @@ function readForm() {
   const offer = Math.round(Number(document.querySelector("#offer").value) * 100) / 100;
   if (!category) return { error: "Pick what kind of thing you want." };
   if (brief.length < 12) return { error: "Give them at least 12 characters." };
-  if (offer < 0.5 || offer > 5) return { error: "The bid stays between $0.50 and $5.00." };
+  if (offer < 0.5 || offer > 5) return { error: "Set a maximum budget between $0.50 and $5.00." };
   return { category, brief, offer };
 }
 
@@ -291,6 +373,7 @@ async function submitHouse() {
   button.disabled = true;
   try {
     const created = await api("/api/jobs", { method: "POST", body: JSON.stringify({ ...posted, mode: "house" }) });
+    clearProjectDraft();
     location.hash = `#/round/${created.jobId}`;
   } catch (error) {
     button.disabled = false;
@@ -336,6 +419,7 @@ async function mountPaypal() {
     },
     onApprove: async (data) => {
       await api(`/api/jobs/${jobId}/authorize`, { method: "POST", body: JSON.stringify({ orderId: data.orderID }) });
+      clearProjectDraft();
       location.hash = `#/round/${jobId}`;
     },
     onError: (error) => toast(error?.message || "PayPal stopped the authorization."),
@@ -451,8 +535,8 @@ function lessonCopy(entries, winnerAgentId, category) {
   }
   const made = ` Making it cost ${usd(winnerSpend)}. You paid ${usd(winner.bid)}.`;
   const promptNote = category === "image" || category === "video"
-    ? " Each model wrote its own prompt from your brief. That prompt is under the work."
-    : " Under each one is how that model turned your brief into the job it actually ran.";
+    ? " Each agent wrote its own prompt from your project. That prompt is under the work."
+    : " Under each one is how that agent turned your project into the job it actually ran.";
   return taste + price + made + promptNote;
 }
 
@@ -474,18 +558,18 @@ async function drawRound(id) {
     const pct = total === 0 ? 12 : Math.max(12, Math.round((finished / total) * 100));
     kicker = `${kicker} · Making it`;
     lede = job.status === "draft"
-      ? "PayPal still has to hold the bid. The models start once it does."
+      ? "PayPal still has to authorize the budget. The agents start once it does."
       : `You held ${usd(job.offer)}. They're working from what you wrote.`;
     body = `<div class="working">
       <div class="meter" aria-hidden="true"><span style="width:${pct}%"></span></div>
-      <p class="fine">${total === 0 ? "Sitting down with your brief." : `${finished} of ${total} have decided.`}</p>
+      <p class="fine">${total === 0 ? "Sitting down with your project." : `${finished} of ${total} have decided.`}</p>
     </div>`;
   } else if (job.status === "failed") {
     kicker = `${kicker} · Stopped`;
     lede = "The round broke before anyone could sell. Write another.";
   } else if (!books) {
     kicker = `${kicker} · Offers`;
-    lede = job.isOwner ? `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.` : `Each price was set without seeing the others. Only the browser that posted this job can choose the winner.`;
+    lede = job.isOwner ? `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.` : `Each price was set without seeing the others. Sign in to the account that started this project to choose the winner.`;
     body = ready.length
       ? `<div class="grid gallery">${ready.map((entry) => `<article class="card blind">
         ${workHTML(entry.deliverable)}
@@ -620,7 +704,7 @@ async function drawAgent(id) {
             <td class="num ${tone(job.net)}">${signed(job.net)}</td>
           </tr>`).join("")}</tbody>
       </table>`
-    : `<p class="empty">Hasn't seen a brief yet.</p>`;
+    : `<p class="empty">Hasn't seen a project yet.</p>`;
   app.innerHTML = shell(`
     <p class="crumbs"><a href="#/ledger">Ledger</a> / ${esc(agent.name)}</p>
     <section class="profile">
@@ -644,7 +728,7 @@ async function drawAgent(id) {
           <li><span>Win rate</span><strong>${pct(perf.winRate)}</strong><em>${perf.wins} of ${perf.decided} decided</em></li>
           <li><span>Back per $1 spent</span><strong>${perDollar(perf.returnPerDollar)}</strong></li>
           <li><span>Average win</span><strong>${perf.avgWin == null ? "—" : usd(perf.avgWin)}</strong></li>
-          <li><span>Sat out</span><strong>${perf.skipped}</strong><em>of ${perf.seen} briefs</em></li>
+          <li><span>Sat out</span><strong>${perf.skipped}</strong><em>of ${perf.seen} projects</em></li>
         </ul>
         <h2>By lane</h2>
         ${lanes}
@@ -758,6 +842,13 @@ async function drawLedger() {
 }
 
 app.addEventListener("click", (event) => {
+  if (event.target.closest?.("#sign-out")) {
+    api("/api/session/logout", { method: "POST", body: "{}" }).then(() => {
+      authenticated = false;
+      route();
+    }).catch((error) => toast(error.message));
+    return;
+  }
   const row = event.target.closest?.("tr[data-href]");
   if (!row || event.target.closest("a, button, summary")) return;
   location.hash = row.dataset.href;

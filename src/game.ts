@@ -19,7 +19,7 @@ import {
   type Voice,
 } from "./catalog";
 import { GameError } from "./errors";
-import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, generationEnabled, generationLimits, type AccessEnv } from "./access";
+import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, emailConfigured, generationEnabled, generationLimits, type AccessEnv } from "./access";
 import { decide, make, paint, type Persona } from "./ai";
 import { fromWork, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
 import { authorizeOrder, captureAuthorization, createAuthorizationOrder, paypalReady, paypalMode, type PaypalEnv } from "./paypal";
@@ -156,13 +156,13 @@ export function ensureReady(db: D1Database): Promise<void> {
   return (async () => {
     try {
       const version = await db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").first<{ value: string }>();
-      if (version?.value === "2") return;
+      if (version?.value === "3") return;
     } catch (error) {
       if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
     }
     await migrateAndSeed(db);
     await db.prepare("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
-    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '2')").run();
+    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '3')").run();
   })();
 }
 
@@ -182,6 +182,7 @@ async function migrateAndSeed(db: D1Database): Promise<void> {
   await ensureColumn(db, "entries", "gen_prompt", "TEXT");
   await ensureColumn(db, "jobs", "owner_session_id", "TEXT");
   await ensureColumn(db, "jobs", "round_started_at", "TEXT");
+  await ensureColumn(db, "access_sessions", "user_id", "TEXT");
   const row = await db.prepare("SELECT COUNT(*) AS n FROM agents").first<{ n: number }>();
   if (row && row.n > 0) return;
   try {
@@ -1168,6 +1169,7 @@ export function configView(env: AppEnv) {
     offerMax: 5,
     categories: CATEGORIES,
     accessRequired: true,
+    signInEnabled: emailConfigured(env),
     generationEnabled: generationEnabled(env),
     generationLimits: generationLimits(env),
   };
