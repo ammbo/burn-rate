@@ -7,8 +7,23 @@ let poll = 0;
 let paypalPromise = null;
 let config = null;
 let authenticated = false;
+let account = { email: null };
 const DRAFT_KEY = "burn-rate-project-v1";
+const SESSION_PING_KEY = "burn-rate-session-ping";
 let memoryDraft = null;
+
+async function refreshSession() {
+  const session = await api("/api/session");
+  const changed = session.authenticated !== authenticated || session.email !== account.email;
+  authenticated = session.authenticated;
+  account = { email: session.email };
+  return changed;
+}
+
+// Other tabs (e.g. the one that requested the sign-in link) re-check the session on this signal.
+function announceSession() {
+  try { localStorage.setItem(SESSION_PING_KEY, String(Date.now())); } catch { /* Tabs re-check on focus instead. */ }
+}
 
 function projectDraft() {
   try {
@@ -18,11 +33,13 @@ function projectDraft() {
         Number.isFinite(saved.offer) && saved.offer >= 0.5 && saved.offer <= 5 &&
         saved.updatedAt > Date.now() - 86400000) return saved;
     localStorage.removeItem(DRAFT_KEY);
-  } catch { /* Keep the in-memory draft when browser storage is unavailable. */ }
+    return null;
+  } catch { /* Fall back to the in-memory draft only when browser storage is unavailable. */ }
   return memoryDraft?.updatedAt > Date.now() - 86400000 ? memoryDraft : null;
 }
 
 function saveProjectDraft(draft) {
+  if (!draft.brief.trim()) return clearProjectDraft();
   memoryDraft = { ...draft, updatedAt: Date.now() };
   try { localStorage.setItem(DRAFT_KEY, JSON.stringify(memoryDraft)); } catch { /* The current form remains editable. */ }
 }
@@ -34,11 +51,10 @@ function clearProjectDraft() {
 
 function emailFormHTML() {
   return `<form id="email-form" class="access-form">
-    <h3>Sign in to start your project</h3>
-    <p class="fine" id="email-hint">We’ll email you a sign-in link. No password; your first sign-in creates your account. Your email stays private.</p>
-    <label for="sign-in-email">Email address</label>
-    <div class="actions"><input id="sign-in-email" type="email" autocomplete="email" maxlength="254" required aria-describedby="email-hint" /><button type="submit" class="house">Email me a sign-in link</button></div>
-    <p class="fine">Open the link in this browser. It expires in 15 minutes. <a href="/privacy">Privacy</a></p>
+    <h3>Sign in to continue</h3>
+    <p class="fine" id="email-hint">We’ll email you a one-time link. No password, and you’ll stay signed in on this browser.</p>
+    <label for="sign-in-email" class="sr-only">Email address</label>
+    <div class="email-row"><input id="sign-in-email" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com" required aria-describedby="email-hint" /><button type="submit" class="house">Email me a link</button></div>
     <p id="email-status" class="fine" role="status" aria-live="polite"></p>
   </form>`;
 }
@@ -51,8 +67,8 @@ function wireEmailForm() {
     button.disabled = true;
     try {
       await api("/api/session/email", { method: "POST", body: JSON.stringify({ email: document.querySelector("#sign-in-email").value }) });
-      status.textContent = "Check your inbox for a sign-in link. Your project draft will be waiting here. You can close this tab after opening the link.";
-      button.textContent = "Send another link";
+      status.textContent = "Check your inbox. Open the link in this browser within 15 minutes; your draft will be waiting.";
+      button.textContent = "Send again";
     } catch (error) { status.textContent = error.message; }
     finally { button.disabled = false; }
   });
@@ -62,11 +78,19 @@ async function drawSignIn(token) {
   document.title = "Sign in · Burn Rate";
   // Remove the secret from the address bar before any third-party SDK can load.
   if (token) history.replaceState(null, "", "#/sign-in");
-  app.innerHTML = shell(`<section class="ask">
+  if (!token && authenticated) {
+    app.innerHTML = shell(`<section class="ask sign-in">
+      <h1>You’re signed in.</h1>
+      <p class="lede">Signed in as ${esc(account.email || "your account")}.</p>
+      <a class="post-link" href="#/post/${projectDraft()?.category || "image"}">Start a project</a>
+    </section>`, "");
+    return;
+  }
+  app.innerHTML = shell(`<section class="ask sign-in">
     <h1>${token ? "Your project is waiting." : "Welcome to Burn Rate."}</h1>
-    ${token ? `<p class="lede">Sign in to continue. Your project won’t be submitted until you choose a checkout option.</p><button type="button" class="house" id="confirm-sign-in">Sign in</button><p id="confirm-status" class="fine" role="status" aria-live="polite"></p>` : ""}
+    ${token ? `<p class="lede">Confirm to sign in. Nothing is submitted until you choose checkout.</p><button type="button" class="house" id="confirm-sign-in">Sign in</button><p id="confirm-status" class="fine" role="status" aria-live="polite"></p>` : ""}
     <div id="new-link" ${token ? "hidden" : ""}>${emailFormHTML()}</div>
-    <p><a href="#/post/image">Back to your project</a></p>
+    <p class="fine"><a href="#/post/image">Back to your project</a></p>
   </section>`, "");
   wireEmailForm();
   document.querySelector("#confirm-sign-in")?.addEventListener("click", async (event) => {
@@ -74,7 +98,8 @@ async function drawSignIn(token) {
     button.disabled = true;
     try {
       await api("/api/session/verify", { method: "POST", body: JSON.stringify({ token }) });
-      authenticated = true;
+      await refreshSession();
+      announceSession();
       location.hash = `#/post/${projectDraft()?.category || "image"}`;
       toast("Signed in. Review your project, then choose a checkout option.");
     } catch (error) {
@@ -203,8 +228,7 @@ function route() {
 async function drawArena(selected = "image") {
   document.title = homeTitle;
   app.innerHTML = shell(`<p class="loading">Checking the wallets…</p>`, "arena");
-  const [data, session] = await Promise.all([api("/api/arena"), api("/api/session")]);
-  authenticated = session.authenticated;
+  const [data] = await Promise.all([api("/api/arena"), refreshSession()]);
   const draft = projectDraft();
   const lanes = config?.categories || [];
   const current = draft?.category || (lanes.some((lane) => lane.id === selected) ? selected : "image");
@@ -257,17 +281,16 @@ async function drawArena(selected = "image") {
       <h2 id="brief-heading">Start a project.</h2>
       <p class="lede arena-lede">Choose a format, describe what you want, and set your maximum budget.</p>
       ${authenticated
-        ? `<p class="fine">Signed in as ${esc(session.email)}. Up to ${esc(config.generationLimits.account)} new rounds per account per day; shared limits also apply.</p>`
-        : `<p class="fine">Write your project first. We’ll ask you to sign in by email when you’re ready to continue.</p>`}
+        ? `<p class="fine">Signed in as ${esc(account.email)}. Up to ${esc(config.generationLimits.account)} new rounds per account per day.</p>`
+        : ""}
       ${config?.generationEnabled ? "" : `<p class="banner">New generations are paused. Explore the public rounds below.</p>`}
       <form id="job-form">
         <fieldset>
-        <label for="brief">What should the agents make?</label>
-        <textarea id="brief" class="brief-box" maxlength="400" aria-describedby="brief-hint brief-privacy" placeholder="${esc(lane?.placeholder || "")}">${esc(draft?.brief || "")}</textarea>
-        <p class="hint" id="brief-hint"></p>
-        <p class="fine">This build is entered in the PayPal + AI hackathon and uses sandbox test funds.</p><p class="fine" id="brief-privacy">Submitted projects and rounds are public. Leave out personal or confidential information. By submitting, you agree to the <a href="/terms">terms</a>; see <a href="/privacy">privacy</a>. Your draft is saved in this browser and restored for up to 24 hours.</p>
         <div class="chips" role="radiogroup" aria-label="Kind of work">${chips}</div>
         <p class="blurb" id="lane-blurb">${esc(laneBlurb(current))}</p>
+        <label for="brief" class="field-label">What should the agents make?</label>
+        <textarea id="brief" class="brief-box" maxlength="400" aria-describedby="brief-hint brief-privacy" placeholder="${esc(lane?.placeholder || "")}">${esc(draft?.brief || "")}</textarea>
+        <p class="hint" id="brief-hint"></p>
         <label class="offer">
           <span>Maximum budget</span>
           <strong id="offer-read">${usd(draft?.offer || lane?.suggestion || 2)}</strong>
@@ -282,9 +305,10 @@ async function drawArena(selected = "image") {
         </fieldset>
       </form>
       <div id="project-sign-in" hidden>${emailFormHTML()}</div>
+      <p class="fine legal" id="brief-privacy">Projects and rounds are public, so leave out anything personal or confidential. This hackathon build uses sandbox test funds. Submitting means you agree to the <a href="/terms">terms</a> and <a href="/privacy">privacy notice</a>.</p>
     </section>
-    <div class="section-head"><h2>Meet the competitors</h2><p>Game costs ${usd(data.stats.burned)} · sales ${usd(data.stats.paid)}</p></div>
-    <p class="fine">Four personalities with separate bankrolls and strategies, all using the same text model. They spend to compete and earn only when chosen. Under $0.10 after a settled round, an agent retires and a challenger takes its seat. <a href="/how-it-works#agents">How the agents work.</a></p>
+    <div class="section-head competitors-head"><h2>Meet the competitors</h2><p>Game costs ${usd(data.stats.burned)} · sales ${usd(data.stats.paid)}</p></div>
+    <p class="section-sub">Four agents, separate bankrolls, one shared text model. They spend to compete and earn only when chosen; below $0.10 they retire. <a href="/how-it-works#agents">How the agents work</a></p>
     <div class="agents">${agents}</div>
     <div class="section-head"><h2>On the board</h2><p>Jobs in motion</p></div>
     <div class="jobs">${live}</div>
@@ -324,7 +348,7 @@ function wireAsk(lanes) {
     offerRead.textContent = usd(offer.value);
     const hold = paypal ? "PayPal authorizes" : "The house tab simulates holding";
     const funds = config?.paypalMode === "sandbox" ? " in test funds" : "";
-    fine.textContent = `${hold} ${usd(offer.value)}${funds}. Compare the completed work, prices, and pitches with agent identities hidden. Choose one winner to capture only its price and release the rest. There is no reject-all option.`;
+    fine.textContent = `${hold} ${usd(offer.value)}${funds}. You pay only the offer you pick; the rest is released.`;
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
     saveProjectDraft({ category: document.querySelector("input[name=lane]:checked").value, brief: brief.value, offer: Number(offer.value) });
@@ -863,8 +887,16 @@ app.addEventListener("click", (event) => {
   if (event.target.closest?.("#sign-out")) {
     api("/api/session/logout", { method: "POST", body: "{}" }).then(() => {
       authenticated = false;
+      account = { email: null };
+      announceSession();
       route();
     }).catch((error) => toast(error.message));
+    return;
+  }
+  const link = event.target.closest?.("a[href^='#/']");
+  if (link && link.getAttribute("href") === location.hash) {
+    event.preventDefault();
+    route();
     return;
   }
   const row = event.target.closest?.("tr[data-href]");
@@ -872,9 +904,20 @@ app.addEventListener("click", (event) => {
   location.hash = row.dataset.href;
 });
 
+async function recheckSession() {
+  try {
+    if (await refreshSession()) route();
+  } catch { /* Keep the current view; the next action will surface errors. */ }
+}
+
 try {
-  config = await api("/api/config");
+  [config] = await Promise.all([api("/api/config"), refreshSession().catch(() => false)]);
   window.addEventListener("hashchange", route);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") recheckSession(); });
+  window.addEventListener("storage", (event) => {
+    if (event.key === SESSION_PING_KEY) recheckSession();
+    if (event.key === DRAFT_KEY && event.newValue === null && document.querySelector("#brief")?.value.trim()) route();
+  });
   route();
 } catch {
   // Keep the readable, linked static page if the interactive service is down.

@@ -69,7 +69,11 @@ app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/config", (c) => c.json(configView(c.env)));
 
-app.get("/api/session", async (c) => c.json(await accountView(c.env, c.req.raw)));
+app.get("/api/session", async (c) => {
+  const { view, cookie } = await accountView(c.env, c.req.raw);
+  if (cookie) c.header("Set-Cookie", cookie);
+  return c.json(view);
+});
 app.post("/api/session/email", async (c) => {
   const body = await c.req.json<{ email?: unknown }>().catch(() => null);
   c.header("Set-Cookie", await requestSignIn(c.env, c.req.raw, body?.email));

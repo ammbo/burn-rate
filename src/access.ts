@@ -42,7 +42,7 @@ export const ACCESS_SCHEMA = [
 ];
 
 const COOKIE = "burn_rate_session";
-const SESSION_SECONDS = 7 * 86400;
+const SESSION_SECONDS = 30 * 86400;
 const LOGIN_COOKIE = "burn_rate_login";
 const LOGIN_SECONDS = 15 * 60;
 
@@ -123,13 +123,13 @@ async function readSession(env: AccessEnv, request: Request) {
   const token = cookieToken(request, COOKIE);
   if (!token) return null;
   const id = await hash(token);
-  const row = await env.DB.prepare(`SELECT s.code_hash, s.user_id, a.email FROM access_sessions s
+  const row = await env.DB.prepare(`SELECT s.code_hash, s.user_id, s.expires_at, a.email FROM access_sessions s
     LEFT JOIN accounts a ON a.id = s.user_id WHERE s.id = ? AND s.expires_at > ?`)
-    .bind(id, Date.now()).first<{ code_hash: string; user_id: string | null; email: string | null }>();
+    .bind(id, Date.now()).first<{ code_hash: string; user_id: string | null; expires_at: number; email: string | null }>();
   if (!row) return null;
-  if (row.user_id && row.email) return { id, principal: row.user_id, email: row.email };
+  if (row.user_id && row.email) return { id, token, expiresAt: row.expires_at, principal: row.user_id, email: row.email };
   // Previously issued invite sessions can still finish their existing rounds.
-  if (env.DEMO_ACCESS_CODE && equalHash(row.code_hash, await hash(env.DEMO_ACCESS_CODE))) return { id, principal: id, email: null };
+  if (env.DEMO_ACCESS_CODE && equalHash(row.code_hash, await hash(env.DEMO_ACCESS_CODE))) return { id, token, expiresAt: row.expires_at, principal: id, email: null };
   return null;
 }
 
@@ -137,9 +137,13 @@ export async function sessionFor(env: AccessEnv, request: Request): Promise<stri
   return (await readSession(env, request))?.principal ?? null;
 }
 
-export async function accountView(env: AccessEnv, request: Request) {
+export async function accountView(env: AccessEnv, request: Request): Promise<{ view: { authenticated: boolean; email: string | null }; cookie?: string }> {
   const session = await readSession(env, request);
-  return { authenticated: Boolean(session?.email), email: session?.email ?? null };
+  const view = { authenticated: Boolean(session?.email), email: session?.email ?? null };
+  // Sliding expiry: active account sessions are renewed once half their lifetime has passed.
+  if (!session?.email || session.expiresAt - Date.now() > (SESSION_SECONDS * 1000) / 2) return { view };
+  await env.DB.prepare("UPDATE access_sessions SET expires_at = ? WHERE id = ?").bind(Date.now() + SESSION_SECONDS * 1000, session.id).run();
+  return { view, cookie: cookie(request, COOKIE, session.token, SESSION_SECONDS) };
 }
 
 export async function requireAccount(env: AccessEnv, request: Request): Promise<string> {
@@ -193,6 +197,28 @@ export async function requestSignIn(env: AccessEnv, request: Request, input: unk
     throw new GameError("The sign-in email couldn't be sent. Your draft is saved; please try again later.", 503);
   }
   return cookie(request, LOGIN_COOKIE, browser, LOGIN_SECONDS, "Lax");
+}
+
+const escapeHtml = (value: string) =>
+  value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+
+export async function notifyOffersReady(env: AccessEnv, jobId: string): Promise<void> {
+  if (!emailConfigured(env)) return;
+  const row = await env.DB.prepare(`SELECT j.brief, a.email FROM jobs j JOIN accounts a ON a.id = j.owner_session_id WHERE j.id = ?`)
+    .bind(jobId).first<{ brief: string; email: string }>();
+  if (!row) return;
+  const link = `${new URL(env.APP_ORIGIN!).origin}/#/round/${encodeURIComponent(jobId)}`;
+  const brief = row.brief.length > 120 ? `${row.brief.slice(0, 117)}…` : row.brief;
+  try {
+    await env.EMAIL!.send({
+      from: { email: env.EMAIL_FROM!, name: "Burn Rate" }, to: row.email,
+      subject: "Your offers are ready",
+      text: `The agents finished your project: "${brief}"\n\nCompare the offers and pay the one you want: ${link}`,
+      html: `<h1>Your offers are ready.</h1><p>The agents finished your project: “${escapeHtml(brief)}”</p><p><a href="${link}">Compare the offers</a></p>`,
+    });
+  } catch {
+    // Provider errors can contain recipient addresses. Do not log them.
+  }
 }
 
 export async function confirmSignIn(env: AccessEnv, request: Request, input: unknown): Promise<string[]> {

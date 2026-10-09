@@ -98,7 +98,7 @@ async function login(ip = "203.0.113.1", email = `${crypto.randomUUID()}@example
   const response = await request("/api/session/verify", { method: "POST", body: { token }, cookie: [browser, previousCookie].filter(Boolean).join("; "), ip });
   assert.equal(response.status, 200, await response.clone().text());
   const cookie = response.headers.get("set-cookie");
-  assert.match(cookie, /HttpOnly; SameSite=Strict; Path=\/; Max-Age=604800; Secure/);
+  assert.match(cookie, /HttpOnly; SameSite=Strict; Path=\/; Max-Age=2592000; Secure/);
   return cookie.split(";")[0];
 }
 const job = { category: "artifact", brief: "A launch memo for a coffee shop", offer: 2, mode: "house" };
@@ -365,4 +365,33 @@ test("project drafts survive reload and sign-in navigation, expire, and clear af
   assert.equal(storage.size, 0);
   vm.runInContext(`saveProjectDraft(${JSON.stringify(draft)}); clearProjectDraft()`, page);
   assert.equal(vm.runInContext("projectDraft()", newPage()), null);
+  vm.runInContext(`saveProjectDraft(${JSON.stringify(draft)})`, page);
+  storage.clear();
+  assert.equal(vm.runInContext("projectDraft()", page), null, "a draft cleared by another tab is not restored from memory");
+  vm.runInContext(`saveProjectDraft(${JSON.stringify({ ...draft, brief: "  " })})`, page);
+  assert.equal(storage.size, 0, "empty drafts are not stored");
+});
+
+test("active sessions renew; a round that ran long emails its owner once", async () => {
+  const cookie = await login();
+  assert.equal((await request("/api/session", { cookie })).headers.get("set-cookie"), null);
+  await env.DB.prepare("UPDATE access_sessions SET expires_at = ?").bind(Date.now() + 86400000).run();
+  const renewed = await request("/api/session", { cookie });
+  assert.equal((await renewed.json()).authenticated, true);
+  assert.match(renewed.headers.get("set-cookie"), new RegExp(`^${cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`));
+  assert.ok((await env.DB.prepare("SELECT expires_at FROM access_sessions").first()).expires_at > Date.now() + 29 * 86400000);
+
+  const { jobId } = await post(cookie);
+  await Promise.all(pending);
+  assert.equal(emails.filter((email) => email.subject === "Your offers are ready").length, 0, "quick rounds do not email");
+  const slow = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO jobs (id, category, brief, offer_usd, authorization_id, status, mode, created_at, owner_session_id, round_started_at, round_token)
+    SELECT ?, category, brief, offer_usd, ?, 'casting', 'house', created_at, owner_session_id, ?, 'slow-token' FROM jobs WHERE id = ?`)
+    .bind(slow, `house_${slow}`, new Date(Date.now() - 5 * 60_000).toISOString(), jobId).run();
+  await env.DB.prepare("INSERT INTO generation_requests (job_id, session_id, ip_hash, created_at) VALUES (?, 'x', 'x', 0)").bind(slow).run();
+  await runRound(env, slow, undefined, "slow-token");
+  await runRound(env, slow, undefined, "slow-token");
+  const ready = emails.filter((email) => email.subject === "Your offers are ready");
+  assert.equal(ready.length, 1);
+  assert.match(ready[0].text, new RegExp(`https://burnrating.com/#/round/${slow}`));
 });

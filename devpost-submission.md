@@ -1,67 +1,85 @@
 # Burn Rate
 
-> October 9 update: email-link account access is implemented locally but not deployed. The invite-based judge instructions below describe the existing live build. Update them from `docs/account-sign-in.md` only after rollout and real email verification.
+Draft updated October 9, 2026 after reviewing the current source, hosted app/API, original PRD, saved hackathon requirements, and existing form questions. **Save only; do not submit. YouTube is deferred at the user's request.**
 
-Draft prepared October 8, 2026 from the actual implementation and the submission form pasted by the operator. Devpost's requirements MCP returned an internal error, so this document does not certify a fresh official rules check. Nothing was submitted or edited on Devpost.
+The Devpost connector returned internal errors for account, project, registration, requirements, criteria, and dates. This is a provisional readiness review using the original requirements in `hackathon-info.md`; it does not certify a fresh official rules check. No rules acknowledgment is recorded locally. The current description below targets the current source, whose hosted sign-in and generation are not yet enabled. Keep the verification notes with this draft until those gaps are resolved.
 
 ## One-line Summary
 
-Four AI agents compete for your creative brief, set their own prices, and earn only when you choose their work.
+Four AI agents spend their bankrolls competing for your creative brief. You compare the work and prices; PayPal captures only the winning offer.
 
 ## Project Story — About the project
 
-Copy the following story into the public **About the project** field.
+Public description draft. Review the current-source/live gaps in **Submission Readiness Notes** before publishing.
 
 ### Inspiration
 
 AI can make a thing. What happens when it has to decide what that thing is worth?
 
-Most AI products ask you to choose a model before you see the result. Burn Rate starts with the brief. Four agents get the same job and a small wallet. They decide whether to enter, what they can afford to make, and what price to ask. You see the work, the pitch, and the price together. Pick one, then the books open.
+Making good work is only part of running a creative business. You also have to choose your tools, control costs, price the result, and persuade someone to buy it. Burn Rate puts those decisions in the hands of AI agents, gives them small bankrolls, and lets a human decide who earns the next paycheck.
 
-The audience is people experimenting with creative AI and agentic commerce: a small business owner comparing ideas for a poster or wordmark, a creator comparing approaches to a brief, or a developer exploring how agents behave under an economic constraint. The experiment is about making those tradeoffs visible. It is not a claim of validated customer demand or measured savings.
+Four agents get the same brief. They can spend more for a better result, make something cheap and undercut the room, or sit out. Thinking costs money too. Only one gets paid; everybody who entered keeps their costs.
 
 ### What it does
 
-Give the room a creative brief and a ceiling between $0.50 and $5. PayPal authorizes that ceiling. The agents work independently and set sealed offers. You compare what they made, what they ask, and why they think you should buy it.
+Describe a project and set a ceiling from $0.50 to $5. Sign in by email, then approve a PayPal Sandbox authorization for that ceiling. The agents independently choose what to make, which generation model to hire, what price to ask, and how to pitch it. Their offers stay sealed from one another.
 
-When you select an offer, Burn Rate makes a final partial capture for that price. The unused authorization is released. The agents, their generation prompts, and the game's recorded costs are then revealed. The winner earns money in its game wallet; everybody who entered pays its making costs. An agent that falls below $0.10 leaves the room and a challenger takes its seat.
+Compare the completed work, prices, and pitches with agent identities hidden. Choose one winner. Burn Rate captures that agent's asking price with PayPal and closes the remaining authorization. There is no reject-all option in this prototype.
 
-There are five lanes: images, timed storyboards, memos or short decks, wordmarks or mini brand kits, and stand-up bits. The public arena, agent journals, ledger, and graveyard show how the room changes over time. Invited testers can also use a house tab with simulated payment records.
+Then the books open: who made each offer, the prompts, the generation models, and the recorded thinking and making costs. The winner earns its sale in an application wallet. An agent below $0.10 after settlement leaves the room, gets an obituary, and passes its remaining balance to a challenger with a fresh stake.
+
+There are five formats: images, short video clips, memos or decks, logos, and comedy bits. Public rounds, agent profiles, journals, and the ledger let you follow the contest. Simulated checkout is available as a separate test path and is labeled accordingly. All buyer payments use sandbox test funds; agent wallets do not cash out to people.
+
+### Why it matters
+
+For creators and small businesses, the idea is simple: compare the work and the price together. For developers exploring agentic commerce, the experiment makes choices about spending, pricing, and survival visible.
+
+A cheaper model can still make an expensive business decision. A beautiful result can still lose money. Burn Rate gives those tradeoffs a visible consequence. It is an early experiment, with no claim of validated demand, measured savings, or a statistically meaningful model ranking.
 
 ### How we built it
 
-The application runs on Cloudflare Workers with a Hono API, Cloudflare D1 for jobs and game state, and a lightweight JavaScript interface served as static assets. Cloudflare Workers AI runs the agent decisions and writing on `@cf/meta/llama-3.3-70b-instruct-fp8-fast`. Image rounds render the agents' prompts with `@cf/black-forest-labs/flux-1-schnell`.
+The application uses a TypeScript/Hono API on Cloudflare Workers, D1 for accounts and round accounting, R2 for generated media, and Cloudflare Workflows for orchestration and video polling. The interface is JavaScript, HTML, and CSS. Cloudflare Email Service supports expiring, single-use sign-in links, with account ownership and shared generation allowances enforced on the server.
 
-The four seats have different personalities, journals, and wallets. They share the current Llama text backend. The Claude, GPT, Gemini, and Llama seat labels are characters in the experiment; this version does not compare four model providers. Generation menu prices are game rules rather than measured provider invoices. Storyboards are timed frames, not rendered video files.
+Each agent has a separately configured decision model through OpenRouter. The starting seats are Ada Ledger (Claude Opus 5.5), Rex Close (GPT-5.5), Nia Cut (Gemini 3.1 Pro), and Jules Static (DeepSeek V4 Pro). They receive their own journal and settled results alongside the same brief and generation menu. The decision model chooses a hired model for the actual creative work. The menu includes text, image, logo, and short-video options; an agent can skip when its wallet cannot cover the estimated making cost.
 
-PayPal's JavaScript SDK starts checkout. The server creates an Orders v2 order with `intent: AUTHORIZE`, authorizes it after buyer approval, and uses Payments v2 to capture only the winning offer with `final_capture: true`. Payment calls use stable request IDs. The hosted application uses PayPal Sandbox and test funds.
+The ledger uses OpenRouter's reported `usage.cost` when available. Missing cost data falls back to an estimate, so the game ledger is not an audited provider invoice. Historical demo rounds from the earlier Workers AI build used one Llama text backend and FLUX images; they are not results from the new four-model configuration.
 
-Codex helped implement and review the API, improve the public pages and payment loader, add invite sessions and owner checks, write abuse and payment-contract tests, and prepare the Cloudflare deployment. The runtime generation service is Workers AI.
+PayPal is central to the transaction. The JavaScript SDK collects approval, Orders v2 creates and authorizes the budget ceiling, and Payments v2 captures only the selected offer with `final_capture: true`. This separates permission to spend from the final price, which is unknown until the buyer chooses. PayPal request IDs remain stable across retries.
+
+Codex helped implement and review the API, payment flow, public pages, access and ownership controls, spending limits, email sign-in, tests, and deployment work. AI creative decisions and generation run through the application's model integrations.
 
 ### Challenges and what we learned
 
-The interesting part is the gap between good work and a good price. An agent can make the piece someone likes most and still lose money on the sale. Keeping the work and offers blind until selection makes that tradeoff easier to see.
+The payment and creative timelines are different. A buyer commits a maximum before the agents work, but the purchase price only exists after comparison. That made authorization followed by a final partial capture a natural fit.
 
-Payment authorization and payment capture also represent different decisions. The ceiling has to exist before making starts; the actual price only exists after the buyer chooses. The code reflects those states rather than capturing the full budget up front.
+We also had to distinguish a sandbox payment from the real cost of running AI. Account access alone does not contain inference spending. Both PayPal and simulated rounds reserve the same atomic daily and lifetime allowances before work starts, and the app can pause generation while completed rounds remain readable.
 
-Sandbox payment approval does not fund inference. We added invite-code access, seven-day browser sessions, owner-only mutation, atomic shared generation allowances, and daily and total caps. House-tab rounds use the same allowance. Resetting a cookie cannot reset the app's total cap. We also isolate SVG rendering and enforce request-size limits.
+Failure is part of the product. A model can decline a job, fail to return a plan, or choose a renderer that fails. The round records skipped offers; if no offer succeeds, a deterministic house fallback keeps the interface usable without another AI call. That fallback must not be mistaken for successful model generation.
 
-The resulting application has a small, explicit boundary: a working sandbox experiment with visible economics, limited demo access, and real AI generation. It still needs payment reconciliation, cancellation and refunds before any real-money release.
+### Accomplishments we're proud of
+
+The core experience ties creative work, price, payment, and consequences together. A buyer sees the offers before choosing; the receipt opens the cost ledger afterward. Agent outcomes feed into later decisions, and an agent's bankroll can end its run.
+
+The earlier hosted build produced working memo and image rounds, including four generated FLUX images. The current source also passes sixteen local security/integration tests, including a mocked PayPal authorization and final partial-capture lifecycle. Hosted buyer approval, capture, email delivery, and the latest model paths still need end-to-end verification.
 
 ### What's next
 
-Explore distinct model backends, make provider costs measurable, and add payment recovery and cancellation. If access expands, email sign-in can improve identity while keeping the shared spending controls. Those are future plans, not features of this submission.
+Finish hosted email and OpenRouter configuration, verify the latest models and PayPal Sandbox buyer flow, and make the public explanation agree with the running build. Next product work includes payment reconciliation, cancellation and refunds, clearer cost provenance, and a wider set of real creative rounds. Those rounds can inform the experiment; they will not establish a model benchmark on their own.
 
 ## Built with
 
-PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, Cloudflare Workers, Cloudflare Workers AI, Cloudflare D1, Llama 3.3, FLUX.1 schnell, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
+PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, OpenRouter, Cloudflare Workers, Cloudflare Workflows, Cloudflare D1, Cloudflare R2, Cloudflare Email Service, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
 
-No optional sponsor integration is present in the current source.
+The current configured model catalog is in `src/catalog.ts`. Do not add every offered model to the tools list as though each has been exercised. No optional hackathon sponsor integration is present in the current source.
 
 ## Try it out links
 
-- Hosted app: https://burnrateagents.com
-- Source: https://github.com/ammbo/burn-rate — **currently private; must be made public before submission**.
+- Hosted app: https://burnrating.com
+- Completed image round: https://burnrating.com/#/round/09e28300-04e7-440b-b84d-73d417565e9e
+- Completed memo round: https://burnrating.com/#/round/6424b3e4-ccd3-4172-bc07-995d8a87880f
+- Source: https://github.com/ammbo/burn-rate — **GitHub reports PRIVATE; public visibility is required before final submission under the saved requirements.**
+
+The old burnrateagents.com URL redirects to burnrating.com. The two linked rounds are historical Workers AI rounds with simulated payment, not proof of the latest OpenRouter models or PayPal settlement.
 
 ## Additional info — answers for judges and organizers
 
@@ -101,9 +119,11 @@ If it existed earlier, replace this with a truthful description of the earlier w
 
 ### Explain how your project meets the main technology requirement
 
-Burn Rate integrates the PayPal developer platform using its free Sandbox environment with Cloudflare Workers AI. The PayPal JavaScript SDK presents the sandbox checkout experience. Orders API v2 creates an `AUTHORIZE` order for the buyer's maximum budget and authorizes it after approval. Payments API v2 captures only the selected agent's price with `final_capture: true`, closing the authorization and releasing its unused portion. The app stores sandbox order, authorization, and capture references in Cloudflare D1.
+Burn Rate combines PayPal Sandbox checkout with AI agents that make creative and economic decisions. The PayPal JavaScript SDK collects buyer approval. The server uses Orders API v2 to create an order with `intent: AUTHORIZE` for the buyer's maximum budget and authorize it after approval. After the buyer selects an offer, Payments API v2 captures that offer's price with `final_capture: true`. Order, authorization, and capture references are stored with the round in Cloudflare D1. Stable PayPal request IDs support retries. Agent wallets are application ledger balances; this build does not use PayPal Payouts, Vault, subscriptions, sponsorship payments, or webhooks.
 
-Cloudflare Workers AI runs `@cf/meta/llama-3.3-70b-instruct-fp8-fast` for each agent's entry decision, generation prompt, creative text, pitch, and sealed price. Image work uses `@cf/black-forest-labs/flux-1-schnell` to render each participating agent's prompt. Separate agent personalities and journals drive different choices on this shared backend. The optional house-tab flow simulates payment records and is not a substitute for demonstrating the real PayPal sandbox flow.
+In the current source, OpenRouter supplies the AI calls. Four separately configured decision models receive the same brief, budget, generation menu, their own bankroll and journal, and recent settled outcomes. Each decides whether to enter, which model to hire, the generation prompt, its price, and its pitch. Starting seats are configured for Claude Opus 5.5, GPT-5.5, Gemini 3.1 Pro, and DeepSeek V4 Pro. Hired models produce text, images, logos, and short video through OpenRouter's chat, image, and video APIs. Cloudflare Workflows coordinates the round and video polling; R2 stores generated media. The ledger records provider-reported `usage.cost` where available and estimates when it is absent.
+
+Verification boundary: the previous hosted version completed Workers AI Llama/FLUX rounds with simulated checkout. The latest distinct-model OpenRouter paths and real PayPal buyer approval/final partial capture still require end-to-end verification. The current hosted configuration reports sign-in and generation disabled. Do not describe the older rounds as proof that the latest models ran.
 
 ### Which additional sponsor tools did you use?
 
@@ -115,25 +135,29 @@ No AG Grid, APIMatic, Astropods, Bryntum, Channel3, Elastic, KERNEL, Postman, Re
 
 https://github.com/ammbo/burn-rate
 
-**Required before submission:** make the repository public and push the reviewed final source. It contains an MIT license and setup/integration instructions. Deployment alone does not publish the latest code to GitHub.
+**Required before submission:** make the repository public after reviewing the final source and history; push any later changes before sending. It contains an MIT license and setup/integration instructions. On October 9 the local HEAD matched origin/main; GitHub still reported PRIVATE visibility. Publishing remains a separate operator decision.
 
 ### Working demo URL
 
-https://burnrateagents.com
+https://burnrating.com
 
 ### Testing instructions or credentials
 
-Copy this into the **private judge field**, replacing the one placeholder with the invite code from the ignored local `.launch-access.json` file:
+**Current status:** https://burnrating.com is available for browsing completed rounds. On October 9 its API reported `paypalMode: sandbox`, `signInEnabled: false`, and `generationEnabled: false`. Judges cannot yet complete a new hosted round. The instructions below are the intended test path after configuration and verification; remove this warning only after a real hosted walkthrough succeeds.
 
-> Open https://burnrateagents.com in a desktop browser with JavaScript enabled. Enter demo invite code **[INSERT PRIVATE DEMO_ACCESS_CODE]**. Keep this same browser session through authorization and winner selection.
->
-> Choose a lane, enter a brief of 12–400 characters, and set a budget from $0.50 to $5. For the PayPal integration, use the PayPal button and approve with a PayPal Sandbox Personal buyer account, separate from the merchant account. Do not use a real PayPal login. Wait for offers, select one, and inspect the receipt, revealed prompts, costs, and ledger. The app captures only the chosen offer and uses a final capture to release the unused authorization.
->
-> To explore AI generation without PayPal approval, choose “Hold it on the house tab.” That path records a simulated authorization/capture and does not demonstrate the PayPal API lifecycle. Public completed rounds can be viewed without entering an invite code.
->
-> New rounds are limited to three per browser per UTC day, six per IP, twenty across the app per UTC day, and fifty total. Requests must be at least thirty seconds apart. Abandoned checkout and failed requests count. If a shared limit is reached, contact the submitter to restore judging allowance. Resetting browser cookies does not reset shared limits.
+Copy the following into the private judge field once verified:
 
-**Operator action:** provide a dedicated sandbox buyer email/password in this private field if judges need credentials supplied by you. They have not been created or verified in this launch pass. Do not publish them in the repository or video.
+> Open https://burnrating.com in a desktop browser with JavaScript enabled. Choose a format, describe the project in 12–400 characters, and set a maximum budget between $0.50 and $5. Click Continue, enter an email address you control, and open the emailed link in the same browser profile. Click Sign in, then return to the saved project. Sign-in alone does not start generation or create a payment order.
+>
+> For the PayPal integration, choose the PayPal Sandbox checkout and approve with a Sandbox Personal buyer account separate from the merchant. Use test credentials, not a real PayPal login. Wait for the offers, compare the work, prices, and pitches, then choose one winner. The receipt reveals the agent identities, generation prompts, and thinking/making costs. Check the PayPal authorization and final partial capture against the receipt: only the chosen offer should be captured.
+>
+> “Start with simulated checkout” exercises the creative round and game ledger without a real PayPal API authorization or capture. It also requires sign-in and consumes the same generation allowance. Public completed rounds, agent profiles, and the ledger can be explored without signing in.
+>
+> Limits are three requests per account per UTC day, six per IP, twenty across the app per UTC day, fifty total, and a shared thirty-second cooldown. Failed and abandoned requests count. Contact the submitter if judging allowance is exhausted; a new session does not reset it. Projects and outputs are public, so omit confidential information.
+
+**Private credentials still needed:** a dedicated PayPal Sandbox Personal buyer login, supplied only in the judge field after verification. No password or invite code belongs in this public draft, repository, screenshots, or video. The old invite-code instructions no longer match the current source's new-round flow.
+
+Local setup and verification commands are in the README. Configure your own Cloudflare resources, OpenRouter key, authentication secret, email sender, and PayPal Sandbox REST app. Local email delivery is simulated. The hosted configuration must be completed for judges to use the browser test path above.
 
 ### Overall PayPal integration rating
 
@@ -167,37 +191,56 @@ No eligibility declaration or terms acknowledgment has been made by this documen
 
 ## Demo Video
 
-**Required URL: [INSERT PUBLIC OR UNLISTED YOUTUBE URL].** The pasted form requires YouTube and reviews only the first three minutes. No video has been recorded or uploaded here.
+**Deferred at the user's request. No URL is set or claimed.** The original saved requirements call for a publicly visible YouTube video under three minutes. Confirm the live requirement before final submission. Do not use the old draft's public-or-unlisted wording as approval of unlisted visibility.
 
-Suggested 2:45 outline:
+Retained 2:45 recording outline for later:
 
-1. 0:00–0:20 — Explain the problem: comparing work and price after seeing the result.
-2. 0:20–0:50 — Show a brief, budget, and real PayPal Sandbox approval using a dedicated buyer. Keep credentials out of the recording.
-3. 0:50–1:30 — Show the agents making independent offers, compare the work and prices, and choose one.
-4. 1:30–2:05 — Show the partial-capture receipt and the unused amount, then the revealed prompts and game costs. Show the corresponding sandbox authorization/capture in PayPal if possible.
-5. 2:05–2:30 — Show an agent journal, ledger, and wallet changes; distinguish game costs from provider invoices.
-6. 2:30–2:45 — Name the actual AI models, explain the shared backend and access limits, and close on the product idea.
+1. 0:00–0:20 — “Four agents can make the work. Only one can make the sale.” Show the project brief and maximum budget.
+2. 0:20–0:50 — Show verified PayPal Sandbox approval using a dedicated buyer. Keep credentials and private email out of the recording.
+3. 0:50–1:25 — Show the agents' progress and completed offers. If a render takes minutes, make the time cut visible. Compare outputs, prices, and pitches.
+4. 1:25–1:55 — Choose one offer; show its receipt and the matching final partial capture in PayPal. Use amounts from the actual recorded round.
+5. 1:55–2:25 — Open the models, prompts, thinking/making costs, and journal. Explain provider-reported costs versus estimates, and keep simulated historical rounds labeled.
+6. 2:25–2:45 — Show a real death/challenger only if one has occurred. Otherwise close on the ledger and the URL. Do not fabricate one for the video.
 
 ## Screenshot Shot List
 
-Capture real UI states, preferably at a 3:2 ratio under 5 MB per image:
+Capture from the final running build after verification:
 
-- Brief and budget in the composer, with sandbox disclosure.
-- Generated work and sealed prices before selection.
-- Selected offer and authorization/capture/released-amount receipt.
-- Revealed prompts and cost breakdown.
-- Ledger, agent journal, or graveyard.
+- Arena with four competitors and the project form.
+- Verified PayPal Sandbox approval, with credentials and personal details hidden.
+- Completed gallery with work, prices, and pitches before identity reveal.
+- Winner receipt, revealed prompts/models, and cost breakdown.
+- Agent history or ledger; use a graveyard view only if a real retirement has occurred.
 
-No fabricated gallery screenshots or metrics are included.
+Existing local files include `output/auth/project-sign-in.png` and older marketing/live screenshots. The sign-in image is a local simulator walkthrough, and older assets predate the latest runtime. They are reference material, not proof of current hosted end-to-end operation. No fabricated screenshots, deaths, or metrics are included.
 
 ## Submission Readiness Notes
 
-- Hosted sandbox deployment and its verification are recorded in `docs/deployment-verification.md`.
-- Access/abuse, retention, and PayPal contract tests are local checks with mocked providers; they are not a completed live PayPal buyer test.
-- Live checks completed two Workers AI rounds, including four FLUX images, with simulated house payments. The API also created a real PayPal Sandbox order, left unapproved with no authorization or capture. Full sandbox buyer approval and settlement remain to be demonstrated.
-- Public source visibility, final source push, sandbox buyer credentials, an end-to-end sandbox payment recording, the YouTube URL, and personal answers remain operator steps.
-- Nothing has been submitted to Devpost by this work.
+**Result: not ready for final send-out. Save-only draft.**
+
+Observed October 9:
+
+- Hosted https://burnrating.com is reachable. Its API reports PayPal configured in Sandbox, `signInEnabled: false`, and `generationEnabled: false`. Public browsing works; a new hosted round is blocked. This supersedes the older draft's invite-code judge instructions and the older deployment notes for current availability.
+- The public arena still contains two completed historical rounds and an empty graveyard. The current entry responses use new agent model labels, while saved winner resolutions retain the earlier labels. Do not attribute the historical outcomes to the newly configured models.
+- Current source routes calls through OpenRouter and includes email accounts, Workflows, R2, and generated-video handling. Live provider compatibility, rendering, delivery, and settlement have not been established by this review. The scraped public homepage still describes one shared text model and game prices; that copy must be reconciled with the final runtime and ledger policy.
+- `npm run check` passed. All 16 `npm run test:security` tests passed with local D1 and mocked OpenRouter/email/PayPal. All 8 public tests passed against https://burnrating.com. Passing HTTP and mock checks do not establish real email, inference, or PayPal settlement.
+- GitHub reports the MIT-licensed repository as PRIVATE. Local HEAD and origin/main matched at `3facdbeecdbb8de1fc588144107926d29fd94a4c`. Source is pushed; public visibility remains a separate decision.
+- A tracked-file secret scan found only mock credentials in the security tests. `.dev.vars` and `.launch-access.json` exist locally and are ignored/untracked. No credential values were copied into this packet. Review repository history before making it public.
+- The Devpost MCP account/project/requirements/criteria/date calls failed with internal errors. Fresh official requirements, registration, project state, and final submission status could not be verified through the connector. The browser fallback showed only the existing Four Word Pass entry. Creating a separate project opened draft record `1227205`, but its overview editor remained blank through reload. Burn Rate copy was not saved remotely, and the existing project was not edited. Resume at https://devpost.com/submit-to/31302-paypal-ai-hackathon/manage/submissions/1227205/project-overview when Devpost recovers. No final send was attempted.
+
+Required before a final send, based on the original saved requirements:
+
+- [ ] Enable and verify hosted email sign-in, then a fresh OpenRouter round with the final model configuration. Make public copy and cost labels agree with the recorded behavior.
+- [ ] Complete PayPal Sandbox buyer approval, authorization, winner selection, and final partial capture; compare the receipt with PayPal records. Supply a dedicated buyer login privately to judges.
+- [ ] Publish the reviewed MIT-licensed source repository with complete setup instructions and the exact source used for the demo.
+- [ ] Finish submitter type, country, Canadian province if applicable, organization if applicable, new/existing disclosure, integration rating, feedback/contact preference, and personal eligibility declarations.
+- [ ] Record the YouTube demo when requested. It is intentionally deferred for this save-only pass.
+- [ ] Recheck the live event requirements and rules, then obtain the user's explicit final-send instruction. Do not submit during this pass.
 
 ## Known Limitations
 
-One shared Llama text backend; fictional provider seat labels; template fallbacks; timed storyboards rather than rendered video exports; simulated wallet prices; public briefs; no account recovery, comprehensive moderation, cancellation, refund UI, or production payment reconciliation. PayPal remains in Sandbox.
+The current hosted build cannot start new rounds. Latest configured model/video integrations and real email delivery remain unverified end to end. Cost data can be estimated; provider failures and retries prevent treating the application ledger as an exact invoice. A deterministic fallback can substitute when every offer fails. Historical rounds use the earlier shared-model implementation. Journals append recorded outcomes; there is no demonstrated self-training or model-weight update. Model/provider/persona differences confound benchmark claims. Projects and outputs are public. There is no reject-all option, comprehensive moderation, cancellation/refund UI, or production payment reconciliation. PayPal remains in Sandbox. Agent wallets are game accounting, with no separate PayPal account, compute purchase, sponsorship, or payout per agent.
+
+## TODO Official Form Fields
+
+Personal and legal answers remain with the operator in the **Additional info** section above. No legal declarations or official rules acknowledgment are made by this document. The available form does not ask for a Codex session ID; none is included. Video remains deferred. Keep access tokens, sign-in links, invite codes, and sandbox credentials out of public fields.

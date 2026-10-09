@@ -16,7 +16,7 @@ The main action is **Start a project**. The text field asks **What should the ag
 
 - The `EMAIL` Worker binding sends through Cloudflare Email Service from `signin@burnrating.com`, restricted by `allowed_sender_addresses`. It needs no separate email API key.
 - Links use 256 random bits, live in URL fragments, expire after 15 minutes, and are stored as hashes. A temporary HttpOnly, Secure-on-HTTPS, SameSite=Lax browser cookie binds each link to the browser that requested it. Verification requires a same-origin JSON POST and consumes the link atomically. GETs/email scanners cannot consume it; the UI removes the token from the address bar before checkout SDK loading.
-- Account sessions last seven days and use hashed bearer tokens with HttpOnly, Secure-on-HTTPS, SameSite=Strict cookies. Email is returned only in the visitor’s own session response, not public arena/round data.
+- Account sessions last 30 days (renewed on use) and use hashed bearer tokens with HttpOnly, Secure-on-HTTPS, SameSite=Strict cookies. Email is returned only in the visitor’s own session response, not public arena/round data.
 - Account IDs are stable across new sessions and own new jobs and generation reservations. Historical database columns `owner_session_id`/`session_id` now contain account IDs for new records.
 - Both payment modes retain the 3/account/UTC-day, 6/IP/UTC-day, 20/app/UTC-day, and 50-total limits and shared 30-second cooldown. Reservations include failed and abandoned requests. Existing lifetime allowance rows remain intact.
 - Email reservations enforce 10/IP/15 minutes, 5/recipient/15 minutes, 15 seconds between requests to one recipient, and 100/app/rolling-day. Failed sends count. Provider error details are not logged because they may contain recipients.

@@ -20,7 +20,7 @@ import {
   type Seat,
 } from "./catalog";
 import { GameError } from "./errors";
-import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, emailConfigured, generationEnabled, generationLimits, type AccessEnv } from "./access";
+import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, emailConfigured, generationEnabled, generationLimits, notifyOffersReady, type AccessEnv } from "./access";
 import { plan, write, type Persona } from "./ai";
 import { fromMedia, fromWriting, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
 import { downloadVideo, image, pollVideo, submitVideo, type OpenRouterEnv, type VideoJob } from "./openrouter";
@@ -125,6 +125,7 @@ interface JobRow {
   resolution_json: string | null;
   created_at: string;
   owner_session_id: string | null;
+  round_started_at?: string | null;
 }
 
 interface EntryRow {
@@ -380,6 +381,7 @@ async function entriesFor(db: D1Database, jobId: string): Promise<EntryRow[]> {
 const THINK_FLOOR = 0.02;
 const VIDEO_POLLS = 40;
 const VIDEO_WAIT_MS = 15_000;
+const NOTIFY_AFTER_MS = 60_000;
 
 export interface Steps {
   do<T>(name: string, fn: () => Promise<T>): Promise<T>;
@@ -711,8 +713,10 @@ async function closeRound(env: AppEnv, jobId: string): Promise<void> {
     }
     await houseEntry(db, richest.row.id, agent, job, job.category);
   }
-  await db.prepare("UPDATE jobs SET status = 'judging' WHERE id = ? AND status = 'casting'").bind(jobId).run();
+  const judged = await db.prepare("UPDATE jobs SET status = 'judging' WHERE id = ? AND status = 'casting'").bind(jobId).run();
   log("round_judging", { jobId });
+  const started = Date.parse(job.round_started_at ?? job.created_at);
+  if (judged.meta.changes === 1 && Date.now() - started >= NOTIFY_AFTER_MS) await notifyOffersReady(env, jobId);
 }
 
 export async function runRound(env: AppEnv, jobId: string, steps: Steps = inline, token = crypto.randomUUID()): Promise<void> {
