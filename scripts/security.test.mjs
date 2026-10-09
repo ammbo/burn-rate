@@ -284,7 +284,7 @@ test("PayPal sandbox authorizes the ceiling and captures only the selected offer
     assert.equal(new URL(url).origin, "https://api-m.sandbox.paypal.com");
     const path = new URL(url).pathname;
     paypalCalls.push({ path, init });
-    const data = path.endsWith("/token") ? { access_token: "test-token", expires_in: 300 }
+    const data = path.endsWith("/token") ? { access_token: "test-token", token_type: "Bearer", expires_in: 300 }
       : path.endsWith("/authorize") ? { purchase_units: [{ payments: { authorizations: [{ id: "test-authorization", status: "CREATED" }] } }] }
       : path.endsWith("/capture") ? { id: "test-capture", status: "COMPLETED" } : { id: "test-order" };
     return Response.json(data);

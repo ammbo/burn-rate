@@ -37,6 +37,8 @@ PAYPAL_MODE=sandbox
 
 Restart `npm run dev`. Posting a job then shows the PayPal button, which creates an order with `intent: AUTHORIZE`. After you approve, the server authorizes the order. When you pick a winner, it captures only that bid.
 
+Server-side calls use the APIMatic-generated [PayPal Server SDK for TypeScript](https://github.com/context-plugins/paypal-typescript-sdk) (`paypal` in `package.json`, pinned to a commit and built on install). It ships with APIMatic's [PayPal Context Plugin](https://context.apimatic.io/plugins/paypal) for coding agents: `npx context-plugins install paypal`.
+
 Without PayPal keys, signed-in visitors can use **Start with simulated checkout**. The round, bids, and ledger still run. The capture id is simulated. Both modes require email sign-in; PayPal sandbox approval does not buy additional AI allowance.
 
 ## Access and inference limits

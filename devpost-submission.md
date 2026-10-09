@@ -44,7 +44,7 @@ Each agent has a separately configured decision model through OpenRouter. The st
 
 The ledger uses OpenRouter's reported `usage.cost` when available. Missing cost data falls back to an estimate, so the game ledger is not an audited provider invoice. Historical demo rounds from the earlier Workers AI build used one Llama text backend and FLUX images; they are not results from the new four-model configuration.
 
-PayPal is central to the transaction. The JavaScript SDK collects approval, Orders v2 creates and authorizes the budget ceiling, and Payments v2 captures only the selected offer with `final_capture: true`. This separates permission to spend from the final price, which is unknown until the buyer chooses. PayPal request IDs remain stable across retries.
+PayPal is central to the transaction. The JavaScript SDK collects approval, Orders v2 creates and authorizes the budget ceiling, and Payments v2 captures only the selected offer with `final_capture: true`. This separates permission to spend from the final price, which is unknown until the buyer chooses. PayPal request IDs remain stable across retries. The server makes those calls through the APIMatic-generated PayPal Server SDK for TypeScript, installed with APIMatic's PayPal Context Plugin, which handles OAuth token caching and returns typed PayPal error bodies.
 
 Codex helped implement and review the API, payment flow, public pages, access and ownership controls, spending limits, email sign-in, tests, and deployment work. AI creative decisions and generation run through the application's model integrations.
 
@@ -68,9 +68,9 @@ Finish hosted email and OpenRouter configuration, verify the latest models and P
 
 ## Built with
 
-PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, OpenRouter, Cloudflare Workers, Cloudflare Workflows, Cloudflare D1, Cloudflare R2, Cloudflare Email Service, AG Grid, AG Charts, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
+PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, APIMatic PayPal Server SDK, APIMatic Context Plugins, OpenRouter, Cloudflare Workers, Cloudflare Workflows, Cloudflare D1, Cloudflare R2, Cloudflare Email Service, AG Grid, AG Charts, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
 
-The current configured model catalog is in `src/catalog.ts`. Do not add every offered model to the tools list as though each has been exercised. The one sponsor integration is AG Grid Community 36.2 with AG Charts Community 14.2, both MIT-licensed and served from `public/vendor/`.
+The current configured model catalog is in `src/catalog.ts`. Do not add every offered model to the tools list as though each has been exercised. The sponsor integrations are AG Grid Community 36.2 with AG Charts Community 14.2, both MIT-licensed and served from `public/vendor/`, and APIMatic's MIT-licensed PayPal Server SDK 2.29 (`paypal`, pinned to a commit of `context-plugins/paypal-typescript-sdk`) behind `src/paypal.ts`.
 
 ## Try it out links
 
@@ -119,7 +119,7 @@ If it existed earlier, replace this with a truthful description of the earlier w
 
 ### Explain how your project meets the main technology requirement
 
-Burn Rate combines PayPal Sandbox checkout with AI agents that make creative and economic decisions. The PayPal JavaScript SDK collects buyer approval. The server uses Orders API v2 to create an order with `intent: AUTHORIZE` for the buyer's maximum budget and authorize it after approval. After the buyer selects an offer, Payments API v2 captures that offer's price with `final_capture: true`. Order, authorization, and capture references are stored with the round in Cloudflare D1. Stable PayPal request IDs support retries. Agent wallets are application ledger balances; this build does not use PayPal Payouts, Vault, subscriptions, sponsorship payments, or webhooks.
+Burn Rate combines PayPal Sandbox checkout with AI agents that make creative and economic decisions. The PayPal JavaScript SDK collects buyer approval. The server uses Orders API v2 to create an order with `intent: AUTHORIZE` for the buyer's maximum budget and authorize it after approval. After the buyer selects an offer, Payments API v2 captures that offer's price with `final_capture: true`. Order, authorization, and capture references are stored with the round in Cloudflare D1. Stable PayPal request IDs support retries. The server calls go through the APIMatic-generated PayPal Server SDK for TypeScript. Agent wallets are application ledger balances; this build does not use PayPal Payouts, Vault, subscriptions, sponsorship payments, or webhooks.
 
 In the current source, OpenRouter supplies the AI calls. Four separately configured decision models receive the same brief, budget, generation menu, their own bankroll and journal, and recent settled outcomes. Each decides whether to enter, which model to hire, the generation prompt, its price, and its pitch. Starting seats are configured for Claude Opus 5.5, GPT-5.5, Gemini 3.1 Pro, and DeepSeek V4 Pro. Hired models produce text, images, logos, and short video through OpenRouter's chat, image, and video APIs. Cloudflare Workflows coordinates the round and video polling; R2 stores generated media. The ledger records provider-reported `usage.cost` where available and estimates when it is absent.
 
@@ -127,9 +127,9 @@ Verification boundary: the previous hosted version completed Workers AI Llama/FL
 
 ### Which additional sponsor tools did you use?
 
-**Copy:** AG Grid.
+**Copy:** AG Grid, APIMatic.
 
-AG Grid Community and AG Charts Community power the Ledger and agent pages. No APIMatic, Astropods, Bryntum, Channel3, Elastic, KERNEL, Postman, Render, or Zapier integration is present.
+AG Grid Community and AG Charts Community power the Ledger and agent pages. APIMatic's PayPal Context Plugin supplied the generated PayPal Server SDK and the agent skills used to integrate it; the SDK makes every server-side PayPal call. No Astropods, Bryntum, Channel3, Elastic, KERNEL, Postman, Render, or Zapier integration is present.
 
 ### Public code repository URL
 
@@ -173,7 +173,15 @@ The authorize-then-capture flow fits this project well: the buyer can set a ceil
 
 ### APIMatic Context Plugin experience
 
-**Copy:** N/A — this project did not use the APIMatic Context Plugin.
+**Copy (editable draft):**
+
+We installed the PayPal Context Plugin into Cursor with `npx context-plugins install paypal` and used it to move Burn Rate's server-side PayPal calls from hand-written `fetch` requests to the APIMatic-generated PayPal Server SDK for TypeScript. The coding agent worked from the SDK map that ships inside the package (`sdk-map.md` and `map/operations/`) and the plugin's TypeScript skills for client setup, authentication, and error handling, rather than from memory.
+
+- **Three calls, one money flow:** `orders.createOrder` with `intent: AUTHORIZE` for the buyer's ceiling, `orders.authorizeOrder` after approval, and `payments.captureAuthorizedPayment` with `finalCapture: true` for the winning bid. Each keeps its stable `PayPal-Request-Id`, so retries stay idempotent.
+- **Less code to own:** the SDK fetches and caches the OAuth token, so the hand-rolled token cache and JSON parsing are gone. The client is built once per credential set and reused across requests.
+- **Typed failures:** every operation rejects with its own error class and a decoded PayPal error body, so the buyer sees PayPal's own reason (for example, "Payer has not yet approved the Order") and the logs keep the status and `debug_id`. A refused token request is a distinct `AuthError`, logged separately from a refused payment.
+
+What worked well: the generated SDK uses only standard `fetch` and Web APIs, so it runs on Cloudflare Workers unchanged; we verified create, authorize, and capture error paths against the PayPal Sandbox from a Worker. The map made field names and wire formats a lookup instead of a guess. Snags: the plugin's skill text named the package `pay-pal-server-sdk` while the repository publishes it as `paypal`, and the token response is schema-checked, so our test fixture needed `token_type`. The SDK declares only a Sandbox environment, so live mode would use a `serverOptions.baseUrl` override.
 
 ### AG Grid experience
 
@@ -236,6 +244,7 @@ Observed October 9:
 - The public arena still contains two completed historical rounds and an empty graveyard. The current entry responses use new agent model labels, while saved winner resolutions retain the earlier labels. Do not attribute the historical outcomes to the newly configured models.
 - Current source routes calls through OpenRouter and includes email accounts, Workflows, R2, and generated-video handling. Live provider compatibility, rendering, delivery, and settlement have not been established by this review. The scraped public homepage still describes one shared text model and game prices; that copy must be reconciled with the final runtime and ledger policy.
 - AG Grid and AG Charts were added on October 9 and verified on a local dev server: all five grids and the bankroll chart render, and filtering, the filtered total row, quick search, CSV export, and row navigation work. **They are not deployed yet**; https://burnrating.com still shows the plain tables until the next `npm run deploy`. The repository must also be pushed before the public code link reflects them.
+- The APIMatic PayPal Server SDK replaced the hand-written PayPal calls on October 9. From a local Worker, sandbox order creation succeeded, and authorize-before-approval, capture of an unknown authorization, and a wrong client secret each returned PayPal's reason. A buyer-approved authorize and final partial capture through the SDK has **not** been run yet; do that before claiming it. Not deployed yet.
 - `npm run check` passed. All 17 `npm run test:security` tests passed with local D1 and mocked OpenRouter/email/PayPal. All 8 public tests passed against https://burnrating.com. Passing HTTP and mock checks do not establish real email, inference, or PayPal settlement.
 - GitHub reports the MIT-licensed repository as PRIVATE. Local HEAD and origin/main matched at `3facdbeecdbb8de1fc588144107926d29fd94a4c`. Source is pushed; public visibility remains a separate decision.
 - A tracked-file secret scan found only mock credentials in the security tests. `.dev.vars` and `.launch-access.json` exist locally and are ignored/untracked. No credential values were copied into this packet. Review repository history before making it public.

@@ -13,7 +13,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "hono": "^4.10.7"
+    "hono": "^4.10.7",
+    "paypal": "github:context-plugins/paypal-typescript-sdk#3a32a7f1556df08a83858734d9bf1cbfab724184"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",
