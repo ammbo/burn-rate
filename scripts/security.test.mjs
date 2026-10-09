@@ -53,7 +53,7 @@ beforeEach(async () => {
   emails = [];
   env = {
     DB: await mf.getD1Database("DB"), DEMO_ACCESS_CODE: "private-test-invite-code", GENERATION_ENABLED: "true", PAYPAL_MODE: "sandbox",
-    AUTH_SECRET: "private-test-auth-secret-at-least-32-characters", EMAIL_FROM: "signin@burnrateagents.com",
+    AUTH_SECRET: "private-test-auth-secret-at-least-32-characters", EMAIL_FROM: "signin@burnrating.com",
     APP_ORIGIN: "https://burnrating.com",
     EMAIL: { async send(message) { emails.push(message); return { messageId: crypto.randomUUID() }; } },
     OPENROUTER_API_KEY: "test-openrouter-key",

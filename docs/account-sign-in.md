@@ -14,7 +14,7 @@ The main action is **Start a project**. The text field asks **What should the ag
 
 ## Controls and migration
 
-- The `EMAIL` Worker binding sends through Cloudflare Email Service from `signin@burnrateagents.com`, restricted by `allowed_sender_addresses`. It needs no separate email API key.
+- The `EMAIL` Worker binding sends through Cloudflare Email Service from `signin@burnrating.com`, restricted by `allowed_sender_addresses`. It needs no separate email API key.
 - Links use 256 random bits, live in URL fragments, expire after 15 minutes, and are stored as hashes. A temporary HttpOnly, Secure-on-HTTPS, SameSite=Lax browser cookie binds each link to the browser that requested it. Verification requires a same-origin JSON POST and consumes the link atomically. GETs/email scanners cannot consume it; the UI removes the token from the address bar before checkout SDK loading.
 - Account sessions last seven days and use hashed bearer tokens with HttpOnly, Secure-on-HTTPS, SameSite=Strict cookies. Email is returned only in the visitor’s own session response, not public arena/round data.
 - Account IDs are stable across new sessions and own new jobs and generation reservations. Historical database columns `owner_session_id`/`session_id` now contain account IDs for new records.

@@ -26,7 +26,7 @@
   },
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "burn-rate-media" }],
   "workflows": [{ "name": "burn-rate-round", "binding": "ROUNDS", "class_name": "RoundWorkflow" }],
-  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["signin@burnrateagents.com"] }],
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["signin@burnrating.com"] }],
   "d1_databases": [
     {
       "binding": "DB",
@@ -36,7 +36,7 @@
   ],
   "vars": {
     "PAYPAL_MODE": "sandbox",
-    "EMAIL_FROM": "signin@burnrateagents.com",
+    "EMAIL_FROM": "signin@burnrating.com",
     "APP_ORIGIN": "https://burnrating.com",
     "GENERATION_ENABLED": "true",
     "GENERATION_DAILY_LIMIT": "20",

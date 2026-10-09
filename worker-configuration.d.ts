@@ -7,7 +7,7 @@ interface __BaseEnv_Env {
 	EMAIL: SendEmail;
 	ASSETS: Fetcher;
 	PAYPAL_MODE: "sandbox";
-	EMAIL_FROM: "signin@burnrateagents.com";
+	EMAIL_FROM: "signin@burnrating.com";
 	GENERATION_ENABLED: "true";
 	GENERATION_DAILY_LIMIT: "20";
 	GENERATION_TOTAL_LIMIT: "50";

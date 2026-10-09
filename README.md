@@ -76,7 +76,7 @@ npm run deploy
 PUBLIC_TEST_ORIGIN=https://burnrating.com npm run test:public
 ```
 
-Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrating.com`. The `EMAIL` binding restricts sending to `signin@burnrateagents.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout. The October 9 account implementation has only been verified locally; see [account rollout](docs/account-sign-in.md).
+Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrating.com`. The `EMAIL` binding restricts sending to `signin@burnrating.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout. The October 9 account implementation has only been verified locally; see [account rollout](docs/account-sign-in.md).
 
 Local email is simulated and saved to files whose paths Wrangler prints. It does not deliver messages unless a remote email binding is explicitly enabled. When using another development port, set `APP_ORIGIN` to that origin as well.
 
