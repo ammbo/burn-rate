@@ -20,7 +20,18 @@ import {
   type Seat,
 } from "./catalog";
 import { GameError } from "./errors";
-import { ACCESS_SCHEMA, assertGenerationEnabled, assertOwner, emailConfigured, generationEnabled, generationLimits, notifyOffersReady, type AccessEnv } from "./access";
+import {
+  ACCESS_SCHEMA,
+  assertGenerationEnabled,
+  assertOwner,
+  emailConfigured,
+  generationEnabled,
+  generationLimits,
+  notifyOffersReady,
+  releaseGeneration,
+  reserveGeneration,
+  type AccessEnv,
+} from "./access";
 import { plan, write, type Persona } from "./ai";
 import { fromMedia, fromWriting, interpret, produce, thing, writePitch, writeReasoning, type Deliverable } from "./make";
 import { downloadVideo, image, pollVideo, submitVideo, type OpenRouterEnv, type VideoJob } from "./openrouter";
@@ -160,13 +171,13 @@ export function ensureReady(db: D1Database): Promise<void> {
   return (async () => {
     try {
       const version = await db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").first<{ value: string }>();
-      if (version?.value === "4") return;
+      if (version?.value === "5") return;
     } catch (error) {
       if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
     }
     await migrateAndSeed(db);
     await db.prepare("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
-    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '4')").run();
+    await db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '5')").run();
   })();
 }
 
@@ -189,6 +200,10 @@ async function migrateAndSeed(db: D1Database): Promise<void> {
   await ensureColumn(db, "access_sessions", "user_id", "TEXT");
   await ensureColumn(db, "jobs", "round_token", "TEXT");
   await ensureColumn(db, "agents", "brain_model", "TEXT");
+  // v5 reserves allowance when a PayPal round is authorized, not when its order is
+  // created. Drafts never ran inference, so their old reservations are returned.
+  await db.prepare("DELETE FROM generation_requests WHERE job_id IN (SELECT id FROM jobs WHERE status = 'draft' AND mode = 'paypal')").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS jobs_owner ON jobs(owner_session_id, created_at)").run();
   const unassigned = await db.prepare("SELECT id, name FROM agents WHERE brain_model IS NULL").all<{ id: string; name: string }>();
   for (const agent of unassigned.results) {
     const seat = seatNamed(agent.name) ?? OPENING[3];
@@ -382,6 +397,7 @@ const THINK_FLOOR = 0.02;
 const VIDEO_POLLS = 40;
 const VIDEO_WAIT_MS = 15_000;
 const NOTIFY_AFTER_MS = 60_000;
+const PAYPAL_DAILY_ORDERS = 10;
 
 export interface Steps {
   do<T>(name: string, fn: () => Promise<T>): Promise<T>;
@@ -765,6 +781,15 @@ export async function createJob(env: AppEnv, posted: PostedJob, ownerSessionId: 
     return { jobId, status: "casting" };
   }
   if (!paypalReady(env)) throw new GameError("PayPal isn't configured in this room.", 400);
+  // Unfinished checkouts don't reserve AI allowance, so bound PayPal order creation separately.
+  const since = new Date(Date.now() - (Date.now() % 86400000)).toISOString();
+  const drafts = await db
+    .prepare("SELECT COUNT(*) AS n FROM jobs WHERE owner_session_id = ? AND mode = 'paypal' AND created_at >= ?")
+    .bind(ownerSessionId, since)
+    .first<{ n: number }>();
+  if ((drafts?.n ?? 0) >= PAYPAL_DAILY_ORDERS) {
+    throw new GameError("You’ve opened PayPal checkout too many times today. Use simulated checkout, or try again tomorrow.", 429);
+  }
   const label = CATEGORIES.find((category) => category.id === posted.category)?.label ?? posted.category;
   const orderId = await createAuthorizationOrder(env, posted.offer, jobId, `Burn Rate ${label}: ${thing(posted.brief)}`);
   await db
@@ -778,7 +803,7 @@ export async function createJob(env: AppEnv, posted: PostedJob, ownerSessionId: 
   return { jobId, orderId, status: "draft" };
 }
 
-export async function approveJob(env: AppEnv, jobId: string, orderId: string, sessionId: string): Promise<{ status: string; authorizationId: string }> {
+export async function approveJob(env: AppEnv, request: Request, jobId: string, orderId: string, sessionId: string): Promise<{ status: string; authorizationId: string }> {
   await assertOwner(env, jobId, sessionId);
   const db = env.DB;
   const job = await db.prepare("SELECT * FROM jobs WHERE id = ?").bind(jobId).first<JobRow>();
@@ -788,8 +813,15 @@ export async function approveJob(env: AppEnv, jobId: string, orderId: string, se
   }
   if (job.status !== "draft") throw new GameError("This authorization is already closed.", 409);
   if (!orderId || job.paypal_order_id !== orderId) throw new GameError("That PayPal order doesn't match this job.", 400);
-  assertGenerationEnabled(env);
-  const authorizationId = await authorizeOrder(env, orderId, jobId);
+  // Reserve before PayPal places the hold: if the room is full, nothing is authorized.
+  await reserveGeneration(env, request, sessionId, jobId);
+  let authorizationId: string;
+  try {
+    authorizationId = await authorizeOrder(env, orderId, jobId);
+  } catch (error) {
+    await releaseGeneration(env, jobId);
+    throw error;
+  }
   const updated = await db
     .prepare("UPDATE jobs SET status = 'casting', authorization_id = ? WHERE id = ? AND status = 'draft'")
     .bind(authorizationId, jobId)
@@ -939,6 +971,41 @@ export async function jobView(env: AppEnv, jobId: string, sessionId: string | nu
   };
 }
 
+// The signed-in owner's projects. Unfinished PayPal checkouts are left out: nothing ran and nothing is held.
+export async function projectsView(env: AppEnv, owner: string) {
+  const rows = await env.DB
+    .prepare(
+      `SELECT j.id, j.category, j.brief, j.offer_usd, j.status, j.mode, j.captured_amount, j.resolution_json, j.created_at,
+              COUNT(e.id) AS seen,
+              COALESCE(SUM(e.status = 'ready'), 0) AS ready,
+              COALESCE(SUM(e.status IN ('ready', 'skipped')), 0) AS finished
+       FROM jobs j LEFT JOIN entries e ON e.job_id = j.id
+       WHERE j.owner_session_id = ? AND j.status != 'draft'
+       GROUP BY j.id ORDER BY j.created_at DESC LIMIT 100`,
+    )
+    .bind(owner)
+    .all<Pick<JobRow, "id" | "category" | "brief" | "offer_usd" | "status" | "mode" | "captured_amount" | "resolution_json" | "created_at"> & { seen: number; ready: number; finished: number }>();
+  return rows.results.map((job) => {
+    const status = job.status === "capturing" ? "judging" : job.status;
+    const resolution = status === "captured" && job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null;
+    return {
+      id: job.id,
+      category: job.category,
+      brief: job.brief,
+      offer: cents(job.offer_usd),
+      status,
+      mode: job.mode,
+      createdAt: job.created_at,
+      seen: job.seen,
+      offers: status === "casting" ? null : job.ready,
+      finished: job.finished,
+      paid: resolution ? cents(job.captured_amount ?? 0) : null,
+      winnerName: resolution?.winnerName ?? null,
+      winnerModel: resolution?.winnerModel ?? null,
+    };
+  });
+}
+
 async function record(db: D1Database, agentId: string) {
   const wins = await db
     .prepare(
@@ -976,7 +1043,7 @@ function obituaryOf(agent: AgentRow) {
   }
 }
 
-export async function arenaView(env: AppEnv) {
+export async function arenaView(env: AppEnv, viewer: string | null = null) {
   const db = env.DB;
   const agents = await db.prepare("SELECT * FROM agents ORDER BY born_at ASC").all<AgentRow>();
   const cards = await Promise.all(
@@ -995,33 +1062,33 @@ export async function arenaView(env: AppEnv) {
         };
       }),
   );
-  const jobs = await db
-    .prepare("SELECT * FROM jobs WHERE status IN ('casting', 'judging', 'capturing', 'captured') ORDER BY created_at DESC LIMIT 12")
+  // Separate queries: rounds nobody picks stay open, and must not crowd out settled ones.
+  const open = await db
+    .prepare("SELECT * FROM jobs WHERE status IN ('casting', 'judging', 'capturing') ORDER BY created_at DESC LIMIT 8")
     .all<JobRow>();
-  const live = [];
-  const recent = [];
-  for (const job of jobs.results) {
-    if (job.status === "captured") {
-      const resolution = job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null;
-      recent.push({
-        id: job.id,
-        category: job.category,
-        brief: job.brief,
-        offer: cents(job.offer_usd),
-        captured: cents(job.captured_amount ?? 0),
-        winnerName: resolution?.winnerName ?? "Someone",
-        winnerModel: resolution?.winnerModel ?? "",
-      });
-    } else {
-      live.push({
-        id: job.id,
-        category: job.category,
-        brief: job.brief,
-        offer: cents(job.offer_usd),
-        status: job.status === "capturing" ? "judging" : job.status,
-      });
-    }
-  }
+  const settled = await db.prepare("SELECT * FROM jobs WHERE status = 'captured' ORDER BY created_at DESC LIMIT 6").all<JobRow>();
+  const mine = (job: JobRow) => Boolean(viewer && job.owner_session_id === viewer);
+  const live = open.results.map((job) => ({
+    id: job.id,
+    category: job.category,
+    brief: job.brief,
+    offer: cents(job.offer_usd),
+    status: job.status === "capturing" ? "judging" : job.status,
+    mine: mine(job),
+  }));
+  const recent = settled.results.map((job) => {
+    const resolution = job.resolution_json ? (JSON.parse(job.resolution_json) as Resolution) : null;
+    return {
+      id: job.id,
+      category: job.category,
+      brief: job.brief,
+      offer: cents(job.offer_usd),
+      captured: cents(job.captured_amount ?? 0),
+      winnerName: resolution?.winnerName ?? "Someone",
+      winnerModel: resolution?.winnerModel ?? "",
+      mine: mine(job),
+    };
+  });
   const dead = agents.results.filter((agent) => agent.status === "dead");
   const burned = await db
     .prepare("SELECT COALESCE(SUM(-amount_usd), 0) AS n FROM wallet_ledger WHERE amount_usd < 0 AND type IN ('decision_tokens', 'generation')")

@@ -281,10 +281,14 @@ textarea { min-height: 140px; resize: vertical; }
   border: 1px solid var(--line);
 }
 .pay { background: var(--ember); }
-.pay:disabled, .house:disabled { opacity: 0.6; cursor: wait; }
+.pay:disabled, .house:disabled { opacity: 0.6; cursor: not-allowed; }
+.pay:disabled { cursor: progress; }
 /* A dark color-scheme makes the PayPal iframe paint an opaque white canvas behind its rounded button. */
 #paypal-checkout { width: min(100%, 360px); min-height: 48px; color-scheme: light; }
-#paypal-status:empty { display: none; }
+/* Some engines still paint the frame's canvas white; clip it to the pill so the corners stay dark. */
+#paypal-checkout iframe { border-radius: 23px; }
+.checkout-status { margin: 0; color: var(--gold); line-height: 1.45; max-width: 60ch; }
+.checkout-status:empty { display: none; }
 
 .callsheet, .grid { display: grid; gap: 12px; margin-top: 18px; }
 .grid { grid-template-columns: repeat(2, 1fr); }
@@ -579,3 +583,31 @@ fieldset:disabled { opacity: .6; }
 .sign-in .post-link { display: inline-block; margin: 8px 0 0; }
 .sign-in > .fine { margin-top: 18px; }
 .bar .house.ghost { padding: 8px 14px; font-size: 14px; }
+.bar-account { margin-left: auto; display: flex; align-items: center; gap: 14px; font-size: 14px; }
+.bar-account a { color: var(--muted); text-decoration: none; white-space: nowrap; }
+.bar-account a.on, .bar-account a:hover { color: var(--ink); }
+.bar-account + .post-link { margin-left: 0; }
+.nav-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--ember);
+  color: #1a0c09;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+.pill.pill-hot { color: #1a0c09; background: var(--gold); border-color: var(--gold); font-weight: 500; }
+.allowance { margin-bottom: 4px; }
+.allowance a { color: var(--gold); text-underline-offset: 3px; }
+.mine-strip { display: grid; gap: 8px; margin: 10px 0 14px; }
+.limit-banner { color: var(--ink); line-height: 1.5; }
+.kpis strong.hot { color: var(--gold); }
+.empty-state { margin-top: 28px; padding: 28px; border: 1px dashed var(--line); border-radius: 18px; }
+.empty-state h2 { margin: 0; font-size: 30px; }
+.empty-state .post-link { display: inline-block; margin-left: 0; }
+.projects-foot { margin-top: 18px; font-size: 13px; }

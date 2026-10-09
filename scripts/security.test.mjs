@@ -230,23 +230,115 @@ test("atomic global reservations survive concurrent requests, new sessions, and 
   const attempts = await Promise.allSettled(Array.from({ length: 12 }, (_, i) => reserveGeneration(env, req, `browser-${i}`, crypto.randomUUID())));
   assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
   await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 86400000).run();
-  await assert.rejects(reserveGeneration(env, req, "another-browser", crypto.randomUUID()), /limit/);
+  await assert.rejects(reserveGeneration(env, req, "another-browser", crypto.randomUUID()), /used all 1 of its rounds/);
 });
 
 test("daily, account and IP limits apply to house and PayPal requests; cooldown is shared", async () => {
   const cookie = await login();
   const { jobId } = await post(cookie);
-  assert.equal((await request("/api/jobs", { method: "POST", body: { ...job, mode: "paypal" }, cookie })).status, 429);
+  const blocked = await request("/api/jobs", { method: "POST", body: { ...job, mode: "paypal" }, cookie });
+  assert.equal(blocked.status, 429);
+  assert.match((await blocked.json()).error, /Another round (is being made right now|just started)\. Try again in \d+ seconds/);
   await Promise.all(pending);
   await env.DB.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?").bind(jobId).run();
   await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 60000).run();
   const req = new Request("https://burnrating.com/api/jobs", { headers: { "cf-connecting-ip": "203.0.113.1" } });
   const sessionId = (await env.DB.prepare("SELECT user_id FROM access_sessions LIMIT 1").first()).user_id;
-  for (const key of ["GENERATION_ACCOUNT_LIMIT", "GENERATION_IP_LIMIT", "GENERATION_DAILY_LIMIT"]) {
+  for (const [key, reason] of [["GENERATION_ACCOUNT_LIMIT", /all 1 of your rounds for today/], ["GENERATION_IP_LIMIT", /This network has used all 1/], ["GENERATION_DAILY_LIMIT", /all 1 of today’s rounds/]]) {
     env[key] = "1";
-    await assert.rejects(reserveGeneration(env, req, sessionId, crypto.randomUUID()), /limit/);
+    await assert.rejects(reserveGeneration(env, req, sessionId, crypto.randomUUID()), reason);
     delete env[key];
   }
+});
+
+function mockPaypal({ authorize = () => ({ purchase_units: [{ payments: { authorizations: [{ id: "test-authorization", status: "CREATED" }] } }] }) } = {}) {
+  const originalFetch = globalThis.fetch;
+  const paypalCalls = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://openrouter.ai/")) return originalFetch(url, init);
+    const path = new URL(url).pathname;
+    paypalCalls.push({ path, init });
+    if (path.endsWith("/authorize")) {
+      const data = authorize();
+      return data instanceof Response ? data : Response.json(data);
+    }
+    return Response.json(path.endsWith("/token") ? { access_token: "test-token", token_type: "Bearer", expires_in: 300 }
+      : path.endsWith("/capture") ? { id: "test-capture", status: "COMPLETED" } : { id: `order-${paypalCalls.length}` });
+  };
+  env.PAYPAL_CLIENT_ID = "sandbox-test-client";
+  env.PAYPAL_CLIENT_SECRET = "sandbox-test-secret";
+  return { paypalCalls, restore: () => { globalThis.fetch = originalFetch; } };
+}
+
+test("an abandoned PayPal checkout reserves nothing; authorization reserves before any hold", async () => {
+  const paypal = mockPaypal();
+  try {
+    const cookie = await login();
+    env.GENERATION_ACCOUNT_LIMIT = "1";
+    const abandoned = await post(cookie, { ...job, mode: "paypal" });
+    assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM generation_requests").first()).n, 0);
+    // The buyer closes PayPal and uses the house tab right away: no cooldown, no lost allowance.
+    const { jobId } = await post(cookie);
+    await Promise.all(pending);
+    // Now the account is out of rounds, so approving the old checkout is refused before PayPal holds anything.
+    await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 300000).run();
+    const late = await request(`/api/jobs/${abandoned.jobId}/authorize`, { method: "POST", body: { orderId: abandoned.orderId }, cookie });
+    assert.equal(late.status, 429);
+    assert.match((await late.json()).error, /all 1 of your rounds for today/);
+    assert.equal(paypal.paypalCalls.filter((call) => call.path.endsWith("/authorize")).length, 0);
+    assert.equal((await env.DB.prepare("SELECT status FROM jobs WHERE id = ?").bind(abandoned.jobId).first()).status, "draft");
+    assert.ok(await env.DB.prepare("SELECT 1 FROM generation_requests WHERE job_id = ?").bind(jobId).first());
+  } finally { paypal.restore(); }
+});
+
+test("a failed PayPal authorization returns its reservation; PayPal orders per account are capped", async () => {
+  let fail = true;
+  const paypal = mockPaypal({ authorize: () => (fail ? Response.json({ name: "INTERNAL_SERVER_ERROR", message: "down" }, { status: 500 }) : undefined) });
+  try {
+    const cookie = await login();
+    const { jobId, orderId } = await post(cookie, { ...job, mode: "paypal" });
+    const failed = await request(`/api/jobs/${jobId}/authorize`, { method: "POST", body: { orderId }, cookie });
+    assert.equal(failed.status, 502);
+    assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM generation_requests").first()).n, 0);
+    assert.equal(calls.length, 0);
+    await env.DB.prepare("UPDATE jobs SET created_at = ?").bind(new Date().toISOString()).run();
+    for (let i = 0; i < 9; i++) await post(cookie, { ...job, mode: "paypal" });
+    const capped = await request("/api/jobs", { method: "POST", body: { ...job, mode: "paypal" }, cookie });
+    assert.equal(capped.status, 429);
+    assert.match((await capped.json()).error, /PayPal checkout too many times today/);
+  } finally { paypal.restore(); }
+});
+
+test("schema v5 returns allowance reserved by unfinished PayPal checkouts under the old flow", async () => {
+  await env.DB.prepare("INSERT INTO jobs (id, category, brief, offer_usd, status, mode, created_at, owner_session_id) VALUES ('old-draft', 'image', 'An abandoned checkout', 2, 'draft', 'paypal', ?, 'someone')").bind(new Date().toISOString()).run();
+  await env.DB.prepare("INSERT INTO jobs (id, category, brief, offer_usd, status, mode, created_at, owner_session_id) VALUES ('old-round', 'image', 'A real round', 2, 'judging', 'house', ?, 'someone')").bind(new Date().toISOString()).run();
+  await env.DB.prepare("INSERT INTO generation_requests VALUES ('old-draft', 'someone', 'ip', ?), ('old-round', 'someone', 'ip', ?)").bind(Date.now(), Date.now()).run();
+  await env.DB.prepare("UPDATE app_meta SET value = '4' WHERE key = 'schema_version'").run();
+  await ensureReady(env.DB);
+  const left = await env.DB.prepare("SELECT job_id FROM generation_requests").all();
+  assert.deepEqual(left.results.map((row) => row.job_id), ["old-round"]);
+});
+
+test("My projects lists only the signed-in owner's started rounds, with their allowance", async () => {
+  const owner = await login("203.0.113.1", "owner@example.com");
+  const stranger = await login("203.0.113.2", "stranger@example.com");
+  assert.equal((await request("/api/projects")).status, 401);
+  const { jobId } = await post(owner);
+  await Promise.all(pending);
+  await env.DB.prepare("INSERT INTO jobs (id, category, brief, offer_usd, status, mode, created_at, owner_session_id) SELECT 'unfinished', 'image', 'Never approved', 2, 'draft', 'paypal', ?, owner_session_id FROM jobs WHERE id = ?").bind(new Date().toISOString(), jobId).run();
+  const mine = await (await request("/api/projects", { cookie: owner })).json();
+  assert.deepEqual(mine.projects.map((project) => project.id), [jobId]);
+  assert.equal(mine.projects[0].status, "judging");
+  assert.equal(mine.projects[0].offers, 4);
+  assert.deepEqual({ used: mine.allowance.used, limit: mine.allowance.limit, remaining: mine.allowance.remaining }, { used: 1, limit: 3, remaining: 2 });
+  assert.doesNotMatch(JSON.stringify(mine), /owner@example.com/);
+  const theirs = await (await request("/api/projects", { cookie: stranger, ip: "203.0.113.2" })).json();
+  assert.deepEqual(theirs.projects, []);
+  assert.equal(theirs.allowance.remaining, 3);
+  const arena = async (cookie) => (await (await request("/api/arena", { cookie })).json()).live.find((row) => row.id === jobId).mine;
+  assert.equal(await arena(owner), true);
+  assert.equal(await arena(stranger), false);
+  assert.equal(await arena(undefined), false);
 });
 
 test("paused or unconfigured generation fails closed before any AI call", async () => {

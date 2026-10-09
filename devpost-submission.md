@@ -173,15 +173,17 @@ The authorize-then-capture flow fits this project well: the buyer can set a ceil
 
 ### APIMatic Context Plugin experience
 
+> If you used the APIMatic Context Plugin during your integration, briefly share your experience — what worked well, any issues you encountered, and how it compared to building without it.
+
 **Copy (editable draft):**
 
-We installed the PayPal Context Plugin into Cursor with `npx context-plugins install paypal` and used it to move Burn Rate's server-side PayPal calls from hand-written `fetch` requests to the APIMatic-generated PayPal Server SDK for TypeScript. The coding agent worked from the SDK map that ships inside the package (`sdk-map.md` and `map/operations/`) and the plugin's TypeScript skills for client setup, authentication, and error handling, rather than from memory.
+We installed the PayPal Context Plugin into Cursor (`npx context-plugins install paypal`) and used it to move Burn Rate's server-side create-order, authorize, and final partial-capture calls from hand-written `fetch` requests to the APIMatic-generated PayPal Server SDK for TypeScript.
 
-- **Three calls, one money flow:** `orders.createOrder` with `intent: AUTHORIZE` for the buyer's ceiling, `orders.authorizeOrder` after approval, and `payments.captureAuthorizedPayment` with `finalCapture: true` for the winning bid. Each keeps its stable `PayPal-Request-Id`, so retries stay idempotent.
-- **Less code to own:** the SDK fetches and caches the OAuth token, so the hand-rolled token cache and JSON parsing are gone. The client is built once per credential set and reused across requests.
-- **Typed failures:** every operation rejects with its own error class and a decoded PayPal error body, so the buyer sees PayPal's own reason (for example, "Payer has not yet approved the Order") and the logs keep the status and `debug_id`. A refused token request is a distinct `AuthError`, logged separately from a refused payment.
+**What worked well:** the SDK map inside the package gave the coding agent exact field names, headers, and error arms to look up instead of guess. The SDK caches the OAuth token and returns typed PayPal error bodies, so buyers see PayPal's own reason and our logs keep the `debug_id`. It uses only standard `fetch`, so it ran on Cloudflare Workers unchanged.
 
-What worked well: the generated SDK uses only standard `fetch` and Web APIs, so it runs on Cloudflare Workers unchanged; we verified create, authorize, and capture error paths against the PayPal Sandbox from a Worker. The map made field names and wire formats a lookup instead of a guess. Snags: the plugin's skill text named the package `pay-pal-server-sdk` while the repository publishes it as `paypal`, and the token response is schema-checked, so our test fixture needed `token_type`. The SDK declares only a Sandbox environment, so live mode would use a `serverOptions.baseUrl` override.
+**Issues:** the plugin's skill text named the package `pay-pal-server-sdk`, but the repository publishes it as `paypal`. The SDK installs from GitHub rather than npm. It declares only a Sandbox environment, so live mode needs a base-URL override. Its schema-checked token response also meant our test fixture needed `token_type`.
+
+**Compared to building without it:** our first attempt used the npm `@paypal/paypal-server-sdk`, whose axios transport failed on Workers ("Unsupported cache mode") until we added an `unstable_` workaround. The plugin's SDK needed no workaround, and the migration took less guesswork than our original hand-written `fetch` calls.
 
 ### AG Grid experience
 

@@ -4,4 +4,9 @@ PAYPAL_MODE=sandbox
 # Use a cryptographically random secret of at least 32 characters.
 AUTH_SECRET=replace-with-a-random-secret-of-at-least-32-characters
 APP_ORIGIN=http://localhost:8787
+# Local requests share one network bucket, so the hosted limits (3 per account, 6 per IP)
+# run out fast while developing. Raise them here; every round still spends real OpenRouter credit.
+GENERATION_ACCOUNT_LIMIT=25
+GENERATION_IP_LIMIT=25
+GENERATION_DAILY_LIMIT=50
 # Existing deployments may keep DEMO_ACCESS_CODE to finish/migrate old rounds.

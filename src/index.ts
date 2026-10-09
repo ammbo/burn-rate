@@ -1,7 +1,19 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { GameError } from "./errors";
-import { accountView, assertSameOrigin, confirmSignIn, requestSignIn, requireAccount, requireSession, reserveGeneration, sessionFor, signOut } from "./access";
+import {
+  accountView,
+  allowanceView,
+  assertGenerationAvailable,
+  assertSameOrigin,
+  confirmSignIn,
+  requestSignIn,
+  requireAccount,
+  requireSession,
+  reserveGeneration,
+  sessionFor,
+  signOut,
+} from "./access";
 import { cleanup } from "./retention";
 import {
   agentView,
@@ -14,6 +26,7 @@ import {
   jobView,
   ledgerView,
   pickWinner,
+  projectsView,
   readJob,
   runRound,
   type AppEnv,
@@ -89,7 +102,13 @@ app.post("/api/session/logout", async (c) => {
   return c.json({ authenticated: false });
 });
 
-app.get("/api/arena", async (c) => c.json(await arenaView(c.env)));
+app.get("/api/arena", async (c) => c.json(await arenaView(c.env, await sessionFor(c.env, c.req.raw))));
+
+app.get("/api/projects", async (c) => {
+  const owner = await requireSession(c.env, c.req.raw);
+  const [allowance, projects] = await Promise.all([allowanceView(c.env, c.req.raw, owner), projectsView(c.env, owner)]);
+  return c.json({ allowance, projects });
+});
 
 app.get("/api/graveyard", async (c) => c.json(await graveyardView(c.env)));
 
@@ -103,7 +122,9 @@ app.post("/api/jobs", async (c) => {
   const sessionId = await requireAccount(c.env, c.req.raw);
   const posted = readJob(await c.req.json().catch(() => null));
   const jobId = crypto.randomUUID();
-  await reserveGeneration(c.env, c.req.raw, sessionId, jobId);
+  // The house tab starts the round now. PayPal reserves allowance once the buyer authorizes.
+  if (posted.mode === "house") await reserveGeneration(c.env, c.req.raw, sessionId, jobId);
+  else await assertGenerationAvailable(c.env, c.req.raw, sessionId);
   const created = await createJob(c.env, posted, sessionId, jobId);
   if (posted.mode === "house") dispatch(c.env, c.executionCtx, created.jobId);
   return c.json(created);
@@ -113,7 +134,7 @@ app.post("/api/jobs/:id/authorize", async (c) => {
   const sessionId = await requireSession(c.env, c.req.raw);
   const body = (await c.req.json().catch(() => null)) as { orderId?: string } | null;
   const jobId = c.req.param("id");
-  const approved = await approveJob(c.env, jobId, body?.orderId ?? "", sessionId);
+  const approved = await approveJob(c.env, c.req.raw, jobId, body?.orderId ?? "", sessionId);
   if (approved.status === "casting") dispatch(c.env, c.executionCtx, jobId);
   return c.json({ jobId, ...approved });
 });

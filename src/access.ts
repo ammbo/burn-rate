@@ -261,23 +261,112 @@ export async function assertOwner(env: AccessEnv, jobId: string, sessionId: stri
   if (job.owner_session_id !== sessionId) throw new GameError("Only the account that started this project can authorize it or choose its winner.", 403);
 }
 
-export async function reserveGeneration(env: AccessEnv, request: Request, sessionId: string, jobId: string): Promise<void> {
+const DAY_MS = 86400000;
+// Any reservation starts a shared cooldown; a round that is still being made holds the room longer.
+const COOLDOWN_MS = 30_000;
+const ROUND_LOCK_MS = 120_000;
+
+const utcDay = (now: number) => now - (now % DAY_MS);
+
+function untilReset(now: number): string {
+  const minutes = Math.max(1, Math.ceil((utcDay(now) + DAY_MS - now) / 60000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+interface Usage { total: number; today: number; account: number; ip: number; lastAt: number | null; castingAt: number | null }
+
+async function usageOf(env: AccessEnv, ip: string, principal: string, now: number): Promise<Usage> {
+  const row = await env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM generation_requests) AS total,
+      (SELECT COUNT(*) FROM generation_requests WHERE created_at >= ?1) AS today,
+      (SELECT COUNT(*) FROM generation_requests WHERE session_id = ?2 AND created_at >= ?1) AS account,
+      (SELECT COUNT(*) FROM generation_requests WHERE ip_hash = ?3 AND created_at >= ?1) AS ip,
+      (SELECT MAX(created_at) FROM generation_requests) AS lastAt,
+      (SELECT MAX(g.created_at) FROM generation_requests g JOIN jobs j ON j.id = g.job_id WHERE j.status = 'casting') AS castingAt`)
+    .bind(utcDay(now), principal, ip).first<Usage>();
+  return row ?? { total: 0, today: 0, account: 0, ip: 0, lastAt: null, castingAt: null };
+}
+
+interface Block { message: string; transient: boolean }
+
+// Explains which limit stops a new round. Daily and total limits hold until reset;
+// the cooldown and the running-round lock clear within two minutes.
+function blockFor(env: AccessEnv, usage: Usage, now: number): Block | null {
+  const limits = generationLimits(env);
+  if (usage.total >= limits.total) {
+    return { message: `The demo has used all ${limits.total} of its rounds, so new projects are closed. You can still explore the public rounds.`, transient: false };
+  }
+  const reset = `More open at midnight UTC, in ${untilReset(now)}.`;
+  if (usage.account >= limits.account) return { message: `You’ve used all ${limits.account} of your rounds for today. ${reset}`, transient: false };
+  if (usage.ip >= limits.ip) return { message: `This network has used all ${limits.ip} of its rounds for today. ${reset}`, transient: false };
+  if (usage.today >= limits.daily) return { message: `The app has run all ${limits.daily} of today’s rounds. ${reset}`, transient: false };
+  const cooldown = usage.lastAt ? usage.lastAt + COOLDOWN_MS : 0;
+  const running = usage.castingAt ? usage.castingAt + ROUND_LOCK_MS : 0;
+  const until = Math.max(cooldown, running);
+  if (until <= now) return null;
+  const seconds = Math.ceil((until - now) / 1000);
+  const why = running > cooldown ? "Another round is being made right now." : "Another round just started.";
+  return { message: `${why} Try again in ${seconds} seconds. Your project is saved.`, transient: true };
+}
+
+// Read-only check before sending someone through PayPal. The reservation itself
+// happens when the round actually starts, so an abandoned checkout costs nothing.
+export async function assertGenerationAvailable(env: AccessEnv, request: Request, principal: string): Promise<void> {
   assertGenerationEnabled(env);
+  const now = Date.now();
+  const block = blockFor(env, await usageOf(env, await ipHash(env, request), principal, now), now);
+  if (block) throw new GameError(block.message, 429);
+}
+
+export async function allowanceView(env: AccessEnv, request: Request, principal: string) {
   const limits = generationLimits(env);
   const now = Date.now();
-  const day = now - (now % 86400000);
+  const usage = await usageOf(env, await ipHash(env, request), principal, now);
+  const block = generationEnabled(env)
+    ? blockFor(env, usage, now)
+    : { message: "New generations are paused. You can still explore completed rounds.", transient: false };
+  return {
+    limit: limits.account,
+    used: usage.account,
+    remaining: Math.max(0, Math.min(limits.account - usage.account, limits.ip - usage.ip, limits.daily - usage.today, limits.total - usage.total)),
+    resetsAt: utcDay(now) + DAY_MS,
+    blocked: block && !block.transient ? block.message : null,
+  };
+}
+
+export async function reserveGeneration(env: AccessEnv, request: Request, sessionId: string, jobId: string): Promise<void> {
+  assertGenerationEnabled(env);
+  // Idempotent per job: a retried PayPal authorization keeps its original reservation.
+  if (await env.DB.prepare("SELECT 1 FROM generation_requests WHERE job_id = ?").bind(jobId).first()) return;
+  const limits = generationLimits(env);
+  const now = Date.now();
   const ip = await ipHash(env, request);
-  // One conditional INSERT is atomic across all Worker instances. Failed/abandoned
-  // requests retain their reservation so retries cannot turn into unbounded spend.
-  const result = await env.DB.prepare(`INSERT INTO generation_requests (job_id, session_id, ip_hash, created_at)
-    SELECT ?, ?, ?, ? WHERE
-    (SELECT COUNT(*) FROM generation_requests) < ? AND
-    (SELECT COUNT(*) FROM generation_requests WHERE created_at >= ?) < ? AND
-    (SELECT COUNT(*) FROM generation_requests WHERE session_id = ? AND created_at >= ?) < ? AND
-    (SELECT COUNT(*) FROM generation_requests WHERE ip_hash = ? AND created_at >= ?) < ? AND
-    NOT EXISTS (SELECT 1 FROM generation_requests WHERE created_at > ?) AND
-    NOT EXISTS (SELECT 1 FROM jobs WHERE status = 'casting' AND created_at > ?)`)
-    .bind(jobId, sessionId, ip, now, limits.total, day, limits.daily, sessionId, day, limits.account, ip, day, limits.ip,
-      now - 30000, new Date(now - 120000).toISOString()).run();
-  if (result.meta.changes !== 1) throw new GameError("The demo limit is reached or another round is being made. Try later, or explore the public rounds.", 429);
+  // One conditional INSERT is atomic across all Worker instances. Failed rounds
+  // retain their reservation so retries cannot turn into unbounded spend.
+  let result: D1Result;
+  try {
+    result = await env.DB.prepare(`INSERT INTO generation_requests (job_id, session_id, ip_hash, created_at)
+      SELECT ?, ?, ?, ? WHERE
+      (SELECT COUNT(*) FROM generation_requests) < ? AND
+      (SELECT COUNT(*) FROM generation_requests WHERE created_at >= ?) < ? AND
+      (SELECT COUNT(*) FROM generation_requests WHERE session_id = ? AND created_at >= ?) < ? AND
+      (SELECT COUNT(*) FROM generation_requests WHERE ip_hash = ? AND created_at >= ?) < ? AND
+      NOT EXISTS (SELECT 1 FROM generation_requests WHERE created_at > ?) AND
+      NOT EXISTS (SELECT 1 FROM generation_requests g JOIN jobs j ON j.id = g.job_id WHERE j.status = 'casting' AND g.created_at > ?)`)
+      .bind(jobId, sessionId, ip, now, limits.total, utcDay(now), limits.daily, sessionId, utcDay(now), limits.account, ip, utcDay(now), limits.ip,
+        now - COOLDOWN_MS, now - ROUND_LOCK_MS).run();
+  } catch (error) {
+    // A concurrent request reserved this same job first.
+    if (error instanceof Error && /UNIQUE constraint/i.test(error.message)) return;
+    throw error;
+  }
+  if (result.meta.changes === 1) return;
+  const block = blockFor(env, await usageOf(env, ip, sessionId, now), now);
+  throw new GameError(block?.message ?? "Another round just started. Try again in a few seconds. Your project is saved.", 429);
+}
+
+// Only for a PayPal draft whose authorization failed: no inference has run.
+export async function releaseGeneration(env: AccessEnv, jobId: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM generation_requests WHERE job_id = ? AND EXISTS (SELECT 1 FROM jobs WHERE id = ? AND status = 'draft')")
+    .bind(jobId, jobId).run();
 }

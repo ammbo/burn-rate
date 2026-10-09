@@ -8,6 +8,7 @@ let paypalPromise = null;
 let config = null;
 let authenticated = false;
 let account = { email: null };
+let needsPick = 0;
 const DRAFT_KEY = "burn-rate-project-v1";
 const SESSION_PING_KEY = "burn-rate-session-ping";
 let memoryDraft = null;
@@ -82,16 +83,16 @@ async function drawSignIn(token) {
     app.innerHTML = shell(`<section class="ask sign-in">
       <h1>You’re signed in.</h1>
       <p class="lede">Signed in as ${esc(account.email || "your account")}.</p>
-      <a class="post-link" href="#/post/${projectDraft()?.category || "image"}">Start a project</a>
-    </section>`, "");
+      <p class="hero-actions"><a class="post-link" href="#/post/${projectDraft()?.category || "image"}">Start a project</a><a class="watch-link" href="#/projects">My projects</a></p>
+    </section>`, "sign-in");
     return;
   }
   app.innerHTML = shell(`<section class="ask sign-in">
     <h1>${token ? "Your project is waiting." : "Welcome to Burn Rate."}</h1>
     ${token ? `<p class="lede">Confirm to sign in. Nothing is submitted until you choose checkout.</p><button type="button" class="house" id="confirm-sign-in">Sign in</button><p id="confirm-status" class="fine" role="status" aria-live="polite"></p>` : ""}
     <div id="new-link" ${token ? "hidden" : ""}>${emailFormHTML()}</div>
-    <p class="fine"><a href="#/post/image">Back to your project</a></p>
-  </section>`, "");
+    <p class="fine">${projectDraft() ? `<a href="#/post/${projectDraft().category}">Back to your project</a>` : `<a href="#/">Back to the arena</a>`}</p>
+  </section>`, "sign-in");
   wireEmailForm();
   document.querySelector("#confirm-sign-in")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -100,8 +101,10 @@ async function drawSignIn(token) {
       await api("/api/session/verify", { method: "POST", body: JSON.stringify({ token }) });
       await refreshSession();
       announceSession();
-      location.hash = `#/post/${projectDraft()?.category || "image"}`;
-      toast("Signed in. Review your project, then choose a checkout option.");
+      const draft = projectDraft();
+      // With a draft waiting, go straight back to it; otherwise land on the account's projects.
+      location.hash = draft ? `#/post/${draft.category}` : "#/projects";
+      toast(draft ? "Signed in. Review your project, then choose a checkout option." : "Signed in.");
     } catch (error) {
       document.querySelector("#confirm-status").textContent = error.message;
       document.querySelector("#new-link").hidden = false;
@@ -151,7 +154,7 @@ const laneName = (id) =>
   ({ image: "Image", video: "Video clip", artifact: "Memo / deck", asset: "Logo", standup: "Comedy bit" })[id] || id;
 
 const laneBlurb = (id) =>
-  ({ image: "A generated still, poster, or illustration.", video: "A generated video clip of up to eight seconds. No rendered video file.", artifact: "A one-page memo or short deck, displayed in your browser.", asset: "A wordmark or mini brand kit with a palette and usage notes.", standup: "A written comedy bit, or a filmed comedy tape. No recorded performance." })[id] || "";
+  ({ image: "A generated still, poster, or illustration.", video: "A generated video clip of up to eight seconds, some with sound.", artifact: "A one-page memo or short deck, displayed in your browser.", asset: "A wordmark or mini brand kit with a palette and usage notes.", standup: "A written comedy bit, or a short filmed comedy tape." })[id] || "";
 
 function toast(message) {
   toastEl.textContent = message;
@@ -298,7 +301,9 @@ function shell(main, active) {
         <a href="#/ledger" class="${active === "ledger" ? "on" : ""}">Ledger</a>
         <a href="/how-it-works">How it works</a>
       </nav>
-      ${authenticated ? `<button type="button" class="house ghost" id="sign-out">Sign out</button>` : `<a href="#/sign-in">Sign in</a>`}
+      <div class="bar-account">${authenticated
+        ? `<a href="#/projects" class="${active === "projects" ? "on" : ""}">My projects${needsPick ? ` <span class="nav-count" title="Ready for your pick">${needsPick}</span>` : ""}</a><button type="button" class="house ghost" id="sign-out">Sign out</button>`
+        : `<a href="#/sign-in" class="${active === "sign-in" ? "on" : ""}">Sign in</a>`}</div>
       <a class="post-link" href="#/post/image">Start a project</a>
     </header>
     <main id="main-content" tabindex="-1">${active === "arena" ? "" : sandboxHTML}${main}</main>
@@ -329,6 +334,7 @@ function route() {
     agent: () => drawAgent(parts[1]),
     graveyard: () => drawGraveyard(),
     ledger: () => drawLedger(),
+    projects: () => drawProjects(),
     "sign-in": () => drawSignIn(parts[1]),
   }[name];
   if (!go) {
@@ -345,12 +351,16 @@ function route() {
 async function drawArena(selected = "image") {
   document.title = homeTitle;
   app.innerHTML = shell(`<p class="loading">Checking the wallets…</p>`, "arena");
-  const [data] = await Promise.all([api("/api/arena"), refreshSession()]);
+  const signedIn = authenticated;
+  const [data, , projects] = await Promise.all([api("/api/arena"), refreshSession(), signedIn ? loadProjects().catch(() => null) : null]);
+  const mine = authenticated ? projects : null;
   const draft = projectDraft();
   const lanes = config?.categories || [];
   const current = draft?.category || (lanes.some((lane) => lane.id === selected) ? selected : "image");
   const lane = lanes.find((item) => item.id === current) || lanes[0];
-  const paypal = Boolean(config?.paypal && authenticated && config?.generationEnabled);
+  const blocked = mine?.allowance.blocked || null;
+  const canStart = Boolean(config?.generationEnabled && !blocked);
+  const paypal = Boolean(config?.paypal && authenticated && canStart);
   const chips = lanes.map((item) => `
     <label class="chip">
       <input type="radio" name="lane" value="${item.id}" ${item.id === current ? "checked" : ""} />
@@ -371,10 +381,10 @@ async function drawArena(selected = "image") {
     ? data.live.map((job) => `
       <a class="job-row" href="#/round/${job.id}">
         <span class="pill">${esc(laneName(job.category))}</span>
-        <span><strong>${esc(job.brief)}</strong><span>${job.status === "judging" ? "Ready to pick" : "Being made"} · you held ${usd(job.offer)}</span></span>
-        <span class="pill">${job.status === "judging" ? "Needs you" : "Live"}</span>
+        <span><strong>${esc(job.brief)}</strong><span>${job.status === "judging" ? "Offers are in" : "Being made"} · ${job.mine ? "you held" : "held"} ${usd(job.offer)}</span></span>
+        <span class="pill ${job.mine && job.status === "judging" ? "pill-hot" : ""}">${job.mine ? (job.status === "judging" ? "Pick a winner" : "Yours") : job.status === "judging" ? "Waiting on the buyer" : "Live"}</span>
       </a>`).join("")
-    : `<p class="empty">Nothing in progress. Write something above.</p>`;
+    : `<p class="empty">Nothing in progress. Start a project above.</p>`;
   const recent = data.recent.length
     ? data.recent.map((job) => `
       <a class="receipt-row" href="#/round/${job.id}">
@@ -391,16 +401,24 @@ async function drawArena(selected = "image") {
         <p>${esc(grave.lastWords)}</p>
       </a>`).join("")}</div>`
     : `<p class="empty">Everybody's still solvent. Give it a few bad bids.</p>`;
+  const active = (mine?.projects || []).filter((project) => project.status === "judging" || project.status === "casting");
+  const yours = active.length
+    ? `<div class="mine-strip" aria-label="Your projects in progress">${active.slice(0, 3).map((project) => projectRowHTML(project)).join("")}
+        ${active.length > 3 ? `<p class="fine"><a href="#/projects">${active.length - 3} more in My projects</a></p>` : ""}</div>`
+    : "";
+  // The hero's sign-in hint is for visitors who haven't signed in yet.
+  const hero = authenticated ? heroHTML.replace(/<p class="fine">[^<]*Sign in by email[^<]*<\/p>/, "") : heroHTML;
   app.innerHTML = shell(`
-    ${heroHTML}
+    ${hero}
     ${sandboxHTML}
     <section class="ask" id="ask" aria-labelledby="brief-heading">
       <h2 id="brief-heading">Start a project.</h2>
       <p class="lede arena-lede">Choose a format, describe what you want, and set your maximum budget.</p>
-      ${authenticated
-        ? `<p class="fine">Signed in as ${esc(account.email)}. Up to ${esc(config.generationLimits.account)} new rounds per account per day.</p>`
-        : ""}
-      ${config?.generationEnabled ? "" : `<p class="banner">New generations are paused. Explore the public rounds below.</p>`}
+      ${authenticated && mine ? `<p class="fine allowance">Signed in as ${esc(account.email)} · ${allowanceText(mine.allowance)} · <a href="#/projects">My projects</a></p>` : ""}
+      ${yours}
+      ${!config?.generationEnabled
+        ? `<p class="banner">New generations are paused. Explore the public rounds below.</p>`
+        : blocked ? `<p class="banner limit-banner">${esc(blocked)}</p>` : ""}
       <form id="job-form">
         <fieldset>
         <div class="chips" role="radiogroup" aria-label="Kind of work">${chips}</div>
@@ -415,8 +433,9 @@ async function drawArena(selected = "image") {
         </label>
         <p class="fine" id="fine"></p>
         <div class="actions">
-          ${paypal ? `<div id="paypal-checkout"></div><p id="paypal-status" class="fine" role="status" aria-live="polite"></p>` : ""}
-          ${authenticated ? `<button class="house ${paypal ? "ghost" : ""}" type="button" id="house" ${config?.generationEnabled ? "" : "disabled"}>${paypal ? "Or start with simulated checkout" : "Start with simulated checkout"}</button>` : `<button class="house" type="submit" id="continue-project">Continue</button>`}
+          ${paypal ? `<div id="paypal-checkout"></div>` : ""}
+          ${authenticated ? `<button class="house ${paypal ? "ghost" : ""}" type="button" id="house" ${canStart ? "" : "disabled"}>${paypal ? "Or start with simulated checkout" : "Start with simulated checkout"}</button>` : `<button class="house" type="submit" id="continue-project">Continue</button>`}
+          <p id="checkout-status" class="checkout-status" role="alert"></p>
         </div>
         ${config?.paypal ? "" : `<p class="fine">Sandbox keys aren't in this room, so the house holds the bid and records the capture here.</p>`}
         </fieldset>
@@ -425,11 +444,11 @@ async function drawArena(selected = "image") {
       <p class="fine legal" id="brief-privacy">Projects and rounds are public, so leave out anything personal or confidential. This hackathon build uses sandbox test funds. Submitting means you agree to the <a href="/terms">terms</a> and <a href="/privacy">privacy notice</a>.</p>
     </section>
     <div class="section-head competitors-head"><h2>Meet the competitors</h2><p>Game costs ${usd(data.stats.burned)} · sales ${usd(data.stats.paid)}</p></div>
-    <p class="section-sub">Four agents, separate bankrolls, one shared text model. They spend to compete and earn only when chosen; below $0.10 they retire. <a href="/how-it-works#agents">How the agents work</a></p>
+    <p class="section-sub">Four agents, each on its own model, with separate bankrolls. They spend to compete and earn only when chosen; below $0.10 they retire. <a href="/how-it-works#agents">How the agents work</a></p>
     <div class="agents">${agents}</div>
     <div class="section-head"><h2>On the board</h2><p>Jobs in motion</p></div>
     <div class="jobs">${live}</div>
-    ${recent ? `<div class="section-head"><h2>Last picks</h2><p>What your eye actually paid</p></div><div class="jobs">${recent}</div>` : ""}
+    ${recent ? `<div class="section-head"><h2>Last picks</h2><p>What buyers actually paid</p></div><div class="jobs">${recent}</div>` : ""}
     <div class="section-head"><h2>Graveyard</h2><p>Wallets that hit the floor</p></div>
     ${graves}
     ${howHTML}
@@ -438,36 +457,60 @@ async function drawArena(selected = "image") {
     event.preventDefault();
     if (authenticated) return;
     const posted = readForm();
-    if (posted.error) return toast(posted.error);
+    if (posted.error) return checkoutError(posted.error);
     saveProjectDraft(posted);
     document.querySelector("#project-sign-in").hidden = false;
     document.querySelector("#sign-in-email").focus();
     document.querySelector("#project-sign-in").scrollIntoView({ block: "center", behavior: "smooth" });
   });
   wireEmailForm();
-  wireAsk(lanes);
+  wireAsk(lanes, paypal);
   if ((location.hash || "").startsWith("#/post")) {
     document.querySelector("#brief")?.focus({ preventScroll: true });
     document.querySelector("#ask")?.scrollIntoView({ block: "start" });
   }
 }
 
-function wireAsk(lanes) {
+async function loadProjects() {
+  const mine = await api("/api/projects");
+  needsPick = mine.projects.filter((project) => project.status === "judging").length;
+  return mine;
+}
+
+function untilText(ts) {
+  const minutes = Math.max(1, Math.ceil((ts - Date.now()) / 60000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+function allowanceText(allowance) {
+  return allowance.blocked ? "no rounds left right now" : `${allowance.remaining} of ${allowance.limit} rounds left today`;
+}
+
+// Errors stay next to the buttons; a toast can vanish before it's read.
+function checkoutError(message) {
+  const status = document.querySelector("#checkout-status");
+  if (status) status.textContent = message || "";
+  else if (message) toast(message);
+}
+
+function wireAsk(lanes, paypal) {
   const offer = document.querySelector("#offer");
   const offerRead = document.querySelector("#offer-read");
   const fine = document.querySelector("#fine");
   const brief = document.querySelector("#brief");
   const hint = document.querySelector("#brief-hint");
   const blurb = document.querySelector("#lane-blurb");
-  const paypal = Boolean(config?.paypal && authenticated && config?.generationEnabled);
+  // Signed-out visitors see the hold they'll get after sign-in, not the fallback.
+  const holds = paypal || Boolean(!authenticated && config?.paypal && config?.generationEnabled);
   let touched = Boolean(projectDraft());
   const sync = () => {
     offerRead.textContent = usd(offer.value);
-    const hold = paypal ? "PayPal authorizes" : "The house tab simulates holding";
+    const hold = holds ? "PayPal authorizes" : "The house tab simulates holding";
     const funds = config?.paypalMode === "sandbox" ? " in test funds" : "";
     fine.textContent = `${hold} ${usd(offer.value)}${funds}. You pay only the offer you pick; the rest is released.`;
     const count = brief.value.trim().length;
     hint.textContent = count > 0 && count < 12 ? "A little more, so they have something to interpret." : "";
+    checkoutError("");
     saveProjectDraft({ category: document.querySelector("input[name=lane]:checked").value, brief: brief.value, offer: Number(offer.value) });
   };
   sync();
@@ -489,10 +532,7 @@ function wireAsk(lanes) {
     });
   });
   document.querySelector("#house")?.addEventListener("click", () => submitHouse());
-  if (paypal) mountPaypal().catch(() => {
-    const status = document.querySelector("#paypal-status");
-    if (status) status.textContent = "PayPal checkout is unavailable right now. You can still try the house tab with simulated payments.";
-  });
+  if (paypal) mountPaypal().catch(() => checkoutError("PayPal checkout is unavailable right now. You can still use simulated checkout."));
 }
 
 function readForm() {
@@ -507,19 +547,20 @@ function readForm() {
 
 async function submitHouse() {
   const posted = readForm();
-  if (posted.error) {
-    toast(posted.error);
-    return;
-  }
+  if (posted.error) return checkoutError(posted.error);
   const button = document.querySelector("#house");
+  const label = button.textContent;
   button.disabled = true;
+  button.textContent = "Starting…";
+  checkoutError("");
   try {
     const created = await api("/api/jobs", { method: "POST", body: JSON.stringify({ ...posted, mode: "house" }) });
     clearProjectDraft();
     location.hash = `#/round/${created.jobId}`;
   } catch (error) {
     button.disabled = false;
-    toast(error.message);
+    button.textContent = label;
+    checkoutError(error.message);
   }
 }
 
@@ -547,26 +588,109 @@ async function mountPaypal() {
   const slot = document.querySelector("#paypal-checkout");
   if (!slot || typeof window.paypal?.Buttons !== "function") return;
   let jobId = "";
+  // PayPal replaces errors thrown in its callbacks with its own; keep ours for onError.
+  let failure = "";
+  const fail = (error) => {
+    failure = error.message;
+    checkoutError(failure);
+    throw error;
+  };
   await window.paypal.Buttons({
     style: { color: "gold", shape: "pill", label: "paypal", height: 46 },
+    onClick: (_data, actions) => {
+      failure = "";
+      const posted = readForm();
+      checkoutError(posted.error || "");
+      // Don't open the PayPal window for a project the server would refuse.
+      return posted.error ? actions.reject() : actions.resolve();
+    },
     createOrder: async () => {
       const posted = readForm();
-      if (posted.error) {
-        toast(posted.error);
-        throw new Error(posted.error);
-      }
-      const created = await api("/api/jobs", { method: "POST", body: JSON.stringify({ ...posted, mode: "paypal" }) });
-      jobId = created.jobId;
-      return created.orderId;
+      if (posted.error) fail(new Error(posted.error));
+      try {
+        const created = await api("/api/jobs", { method: "POST", body: JSON.stringify({ ...posted, mode: "paypal" }) });
+        jobId = created.jobId;
+        return created.orderId;
+      } catch (error) { return fail(error); }
     },
     onApprove: async (data) => {
-      await api(`/api/jobs/${jobId}/authorize`, { method: "POST", body: JSON.stringify({ orderId: data.orderID }) });
+      try {
+        await api(`/api/jobs/${jobId}/authorize`, { method: "POST", body: JSON.stringify({ orderId: data.orderID }) });
+      } catch (error) { return fail(error); }
       clearProjectDraft();
       location.hash = `#/round/${jobId}`;
     },
-    onError: (error) => toast(error?.message || "PayPal stopped the authorization."),
-    onCancel: () => toast("Authorization cancelled. The job is still a draft."),
+    onError: () => checkoutError(failure || "PayPal stopped the authorization. Nothing was charged."),
+    onCancel: () => checkoutError("Checkout cancelled. Nothing was held, and your project is still here."),
   }).render(slot);
+}
+
+const PROJECT_GROUPS = [
+  { status: "judging", title: "Ready for your pick", note: "The offers are in. Nothing is captured until you choose." },
+  { status: "casting", title: "Being made", note: "The agents are working. This page updates on its own." },
+  { status: "captured", title: "Settled", note: "Paid, with the books open" },
+  { status: "failed", title: "Stopped", note: "The round broke; nothing was captured" },
+];
+
+function projectRowHTML(project) {
+  const status = {
+    judging: [`${project.offers} ${project.offers === 1 ? "offer" : "offers"} · you held ${usd(project.offer)}`, "Pick a winner"],
+    casting: [`${project.finished} of ${project.seen || 4} agents done · you held ${usd(project.offer)}`, "Being made"],
+    captured: [`Paid ${usd(project.paid)} of ${usd(project.offer)} to ${esc(project.winnerName || "the winner")}`, "Paid"],
+    failed: [`Held ${usd(project.offer)} · nothing captured`, "Stopped"],
+  }[project.status] || [`Held ${usd(project.offer)}`, jobStatusLabel(project.status)];
+  return `<a class="job-row project-row" href="#/round/${esc(project.id)}" data-status="${esc(project.status)}">
+    <span class="pill">${esc(laneName(project.category))}</span>
+    <span><strong>${esc(project.brief)}</strong><span>${status[0]} · ${esc(when(project.createdAt))}${project.mode === "paypal" ? " · PayPal" : ""}</span></span>
+    <span class="pill ${project.status === "judging" ? "pill-hot" : ""}">${esc(status[1])}</span>
+  </a>`;
+}
+
+async function drawProjects(refresh = false) {
+  document.title = "My projects · Burn Rate";
+  if (!authenticated) {
+    app.innerHTML = shell(`<section class="ask sign-in">
+      <h1>My projects.</h1>
+      <p class="lede">Sign in with the email you used to start your projects. Rounds, offers, and receipts follow your account to any device.</p>
+      ${emailFormHTML()}
+    </section>`, "projects");
+    wireEmailForm();
+    return;
+  }
+  if (!refresh) app.innerHTML = shell(`<p class="loading">Finding your projects…</p>`, "projects");
+  const { allowance, projects } = await loadProjects();
+  const settled = projects.filter((project) => project.status === "captured");
+  const paid = settled.reduce((sum, project) => sum + (project.paid || 0), 0);
+  const held = settled.reduce((sum, project) => sum + project.offer, 0);
+  const groups = PROJECT_GROUPS.map((group) => {
+    const rows = projects.filter((project) => project.status === group.status);
+    return rows.length
+      ? `<div class="section-head"><h2>${group.title}</h2><p>${group.note}</p></div><div class="jobs">${rows.map(projectRowHTML).join("")}</div>`
+      : "";
+  }).join("");
+  app.innerHTML = shell(`
+    <section class="hero">
+      <p class="kicker">Your account</p>
+      <h1>My projects.</h1>
+      <p class="lede">Everything you’ve started as ${esc(account.email || "this account")}. Pick winners, check rounds in progress, and reopen the books.</p>
+    </section>
+    <ul class="kpis wide">
+      <li><span>Rounds left today</span><strong>${allowance.blocked ? "0" : allowance.remaining} of ${allowance.limit}</strong><em>Resets in ${untilText(allowance.resetsAt)} (midnight UTC)</em></li>
+      <li><span>Ready for your pick</span><strong class="${needsPick ? "hot" : ""}">${needsPick}</strong><em>${projects.filter((project) => project.status === "casting").length} being made</em></li>
+      <li><span>Settled</span><strong>${settled.length}</strong><em>of ${projects.length} started</em></li>
+      <li><span>You paid</span><strong>${usd(paid)}</strong><em>${settled.length ? `${usd(held - paid)} of ${usd(held)} held went back` : "Nothing settled yet"}</em></li>
+    </ul>
+    ${allowance.blocked ? `<p class="banner limit-banner">${esc(allowance.blocked)}</p>` : ""}
+    ${projects.length
+      ? groups
+      : `<div class="empty-state"><h2>No projects yet.</h2><p class="lede">Describe what you want, set a budget, and four agents compete to make it.</p><a class="post-link" href="#/post/image">Start a project</a></div>`}
+    ${projects.length ? `<p class="fine projects-foot">Unfinished PayPal checkouts aren’t listed: nothing was held and the agents never started.</p>` : ""}
+  `, "projects");
+  if (projects.some((project) => project.status === "casting")) {
+    poll = window.setTimeout(() => {
+      if (location.hash === "#/projects") drawProjects(true).catch((error) => toast(error.message));
+    }, 5000);
+  }
 }
 
 function svgImage(svg, caption = "Generated artwork") {
@@ -666,7 +790,7 @@ function orderKey(id) {
   return hash >>> 0;
 }
 
-function lessonCopy(entries, winnerAgentId, category) {
+function lessonCopy(entries, winnerAgentId, category, isOwner) {
   const ready = entries.filter((entry) => entry.status === "ready");
   const winner = ready.find((entry) => entry.agentId === winnerAgentId);
   if (!winner) return "";
@@ -678,11 +802,12 @@ function lessonCopy(entries, winnerAgentId, category) {
   const maxSpend = Math.max(...spends);
   const minBid = Math.min(...bids);
   const maxBid = Math.max(...bids);
-  let taste = "You picked the piece.";
+  const pick = isOwner ? "Your favorite" : "The buyer’s pick";
+  let taste = isOwner ? "You picked the piece." : "The buyer picked the piece.";
   if (ready.length > 1 && maxSpend - minSpend >= 0.05) {
-    if (winnerSpend <= minSpend + 0.001) taste = "Your favorite was the cheapest one to make.";
-    else if (winnerSpend >= maxSpend - 0.001) taste = "Your favorite was the most expensive one to make.";
-    else taste = "Your favorite sat in the middle of what they spent.";
+    if (winnerSpend <= minSpend + 0.001) taste = `${pick} was the cheapest one to make.`;
+    else if (winnerSpend >= maxSpend - 0.001) taste = `${pick} was the most expensive one to make.`;
+    else taste = `${pick} sat in the middle of what they spent.`;
   } else if (ready.length > 1) {
     taste = "They spent about the same. The difference was the work.";
   }
@@ -692,10 +817,11 @@ function lessonCopy(entries, winnerAgentId, category) {
     else if ((winner.bid || 0) >= maxBid - 0.001) price = " It was also the highest bid.";
     else price = " The bid landed in the middle of the field.";
   }
-  const made = ` Making it cost ${usd(winnerSpend)}. You paid ${usd(winner.bid)}.`;
+  const made = ` Making it cost ${usd(winnerSpend)}. ${isOwner ? "You" : "The buyer"} paid ${usd(winner.bid)}.`;
+  const project = isOwner ? "your project" : "the project";
   const promptNote = category === "image" || category === "video"
-    ? " Each agent wrote its own prompt from your project. That prompt is under the work."
-    : " Under each one is how that agent turned your project into the job it actually ran.";
+    ? ` Each agent wrote its own prompt from ${project}. That prompt is under the work.`
+    : ` Under each one is how that agent turned ${project} into the job it actually ran.`;
   return taste + price + made + promptNote;
 }
 
@@ -711,35 +837,41 @@ async function drawRound(id) {
   let body = "";
   let kicker = laneName(job.category);
   let lede = "";
-  if (job.status === "casting" || job.status === "draft") {
+  if (job.status === "draft") {
+    kicker = `${kicker} · Not started`;
+    lede = "PayPal checkout wasn’t finished, so nothing is held and the agents never started.";
+    body = job.isOwner ? `<p><a class="post-link" href="#/post/${esc(job.category)}">Start a new project</a></p>` : "";
+  } else if (job.status === "casting") {
     const finished = data.entries.filter((entry) => entry.status === "ready" || entry.status === "skipped").length;
     const total = data.entries.length;
     const pct = total === 0 ? 12 : Math.max(12, Math.round((finished / total) * 100));
     kicker = `${kicker} · Making it`;
-    lede = job.status === "draft"
-      ? "PayPal still has to authorize the budget. The agents start once it does."
-      : `You held ${usd(job.offer)}. They're working from what you wrote.`;
+    lede = job.isOwner
+      ? `You held ${usd(job.offer)}. They're working from what you wrote. You can leave; this round is saved in My projects.`
+      : `The buyer held ${usd(job.offer)}. The agents are working from the project.`;
     body = `<div class="working">
       <div class="meter" aria-hidden="true"><span style="width:${pct}%"></span></div>
       <p class="fine">${total === 0 ? "Sitting down with your project." : `${finished} of ${total} are done.`}${job.category === "video" ? " Video takes a few minutes to render." : ""}</p>
     </div>`;
   } else if (job.status === "failed") {
     kicker = `${kicker} · Stopped`;
-    lede = "The round broke before anyone could sell. Write another.";
+    lede = "The round broke before anyone could sell. Nothing was captured.";
   } else if (!books) {
     kicker = `${kicker} · Offers`;
-    lede = job.isOwner ? `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want.` : `Each price was set without seeing the others. Sign in to the account that started this project to choose the winner.`;
+    lede = job.isOwner
+      ? `You held ${usd(job.offer)}. Each price was set without seeing the others. Pay the one you want; the rest of the hold is released.`
+      : `Each price was set without seeing the others. Only the buyer who started this project can choose the winner.`;
     body = ready.length
       ? `<div class="grid gallery">${ready.map((entry) => `<article class="card blind">
         ${workHTML(entry.deliverable)}
         <h3 class="offer-price">${usd(entry.bid)}</h3>
         ${entry.pitch ? `<p class="pitch">${esc(entry.pitch)}</p>` : ""}
-        <button class="pay" type="button" data-entry="${entry.id}" ${job.isOwner ? "" : "disabled"}>${job.isOwner ? `Pay ${usd(entry.bid)}` : "Owner selects"}</button>
+        ${job.isOwner ? `<button class="pay" type="button" data-entry="${entry.id}">Pay ${usd(entry.bid)}</button>` : ""}
       </article>`).join("")}</div>`
       : `<p class="empty">Nobody put work up.</p>`;
   } else {
     kicker = `${kicker} · The books`;
-    lede = lessonCopy(ready, resolution?.winnerId, job.category);
+    lede = lessonCopy(ready, resolution?.winnerId, job.category, job.isOwner);
     const everyone = [...ready, ...skipped];
     const lines = everyone.map((entry) => {
       const thinking = entry.costDecision || 0;
@@ -788,7 +920,9 @@ async function drawRound(id) {
   const banner = resolution
     ? `<div class="banner">
         <span class="mono">${job.mode === "paypal" ? "PayPal capture" : "House tab"} · ${esc(resolution.captureId)}</span>
-        <strong>You held ${usd(resolution.authorized)}. You paid ${usd(resolution.captured)}. ${usd(resolution.released)} went back.</strong>
+        <strong>${job.isOwner
+          ? `You held ${usd(resolution.authorized)}. You paid ${usd(resolution.captured)}. ${usd(resolution.released)} went back.`
+          : `The buyer held ${usd(resolution.authorized)} and paid ${usd(resolution.captured)}. ${usd(resolution.released)} went back.`}</strong>
         <p>${esc(resolution.winnerName)} · ${esc(resolution.winnerModel)}</p>
         ${(resolution.funerals || []).map((funeral) => `<p class="funeral">${esc(funeral.name)} is dead. ${esc(funeral.heirName)} took the chair. “${esc(funeral.lastWords)}”</p>`).join("")}
       </div>`
@@ -798,6 +932,7 @@ async function drawRound(id) {
       <p class="kicker">${esc(kicker)}</p>
       <h1>${esc(job.brief)}</h1>
       ${lede ? `<p class="lede">${esc(lede)}</p>` : ""}
+      ${job.status === "judging" && !job.isOwner && !authenticated ? `<p class="fine">Started this project? <a href="#/sign-in">Sign in</a> with the same email to choose the winner.</p>` : ""}
     </section>
     ${banner}
     ${body}
@@ -811,6 +946,7 @@ async function drawRound(id) {
       button.textContent = "Paying…";
       try {
         await api(`/api/jobs/${id}/winner`, { method: "POST", body: JSON.stringify({ entryId }) });
+        needsPick = Math.max(0, needsPick - 1);
         await drawRound(id);
       } catch (error) {
         button.disabled = false;
@@ -819,7 +955,7 @@ async function drawRound(id) {
       }
     });
   });
-  if (job.status === "casting" || job.status === "draft") {
+  if (job.status === "casting") {
     poll = window.setTimeout(() => {
       if ((location.hash || "").includes(id)) drawRound(id).catch((error) => toast(error.message));
     }, 2000);
