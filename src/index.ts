@@ -21,12 +21,23 @@ import {
 
 const app = new Hono<{ Bindings: AppEnv }>();
 
+function dispatch(env: AppEnv, ctx: { waitUntil(promise: Promise<unknown>): void }, jobId: string): void {
+  const crash = (error: unknown) => {
+    const message = error instanceof Error ? error.message : "error";
+    console.log(JSON.stringify({ event: "round_crash", jobId, message }));
+  };
+  // Tests and plain `wrangler dev` without the binding run the round inline.
+  if (env.ROUNDS) ctx.waitUntil(env.ROUNDS.create({ id: jobId, params: { jobId } }).then(() => undefined, crash));
+  else ctx.waitUntil(runRound(env, jobId).catch(crash));
+}
+
 app.use("*", async (c, next) => {
   const url = new URL(c.req.url);
-  const productionHost = url.hostname === "burnrateagents.com" || url.hostname === "www.burnrateagents.com";
-  if (productionHost && (url.hostname.startsWith("www.") || url.protocol !== "https:")) {
-    url.hostname = "burnrateagents.com";
+  const productionHost = ["burnrating.com", "www.burnrating.com", "burnrateagents.com", "www.burnrateagents.com"].includes(url.hostname);
+  if (productionHost && (url.hostname !== "burnrating.com" || url.protocol !== "https:")) {
+    url.hostname = "burnrating.com";
     url.protocol = "https:";
+    url.port = "";
     return c.redirect(url.toString(), 308);
   }
   await next();
@@ -90,15 +101,7 @@ app.post("/api/jobs", async (c) => {
   const jobId = crypto.randomUUID();
   await reserveGeneration(c.env, c.req.raw, sessionId, jobId);
   const created = await createJob(c.env, posted, sessionId, jobId);
-  if (posted.mode === "house") {
-    const jobId = created.jobId;
-    c.executionCtx.waitUntil(
-      runRound(c.env, jobId).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "error";
-        console.log(JSON.stringify({ event: "round_crash", jobId, message }));
-      }),
-    );
-  }
+  if (posted.mode === "house") dispatch(c.env, c.executionCtx, created.jobId);
   return c.json(created);
 });
 
@@ -107,14 +110,7 @@ app.post("/api/jobs/:id/authorize", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { orderId?: string } | null;
   const jobId = c.req.param("id");
   const approved = await approveJob(c.env, jobId, body?.orderId ?? "", sessionId);
-  if (approved.status === "casting") {
-    c.executionCtx.waitUntil(
-      runRound(c.env, jobId).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "error";
-        console.log(JSON.stringify({ event: "round_crash", jobId, message }));
-      }),
-    );
-  }
+  if (approved.status === "casting") dispatch(c.env, c.executionCtx, jobId);
   return c.json({ jobId, ...approved });
 });
 
@@ -125,14 +121,40 @@ app.post("/api/jobs/:id/winner", async (c) => {
   return c.json(resolution);
 });
 
+app.get("/api/media/:job/:file", async (c) => {
+  const key = `jobs/${c.req.param("job")}/${c.req.param("file")}`;
+  if (!/^jobs\/[A-Za-z0-9-]{1,64}\/[A-Za-z0-9-]{1,64}\.(png|jpeg|webp|svg|mp4)$/.test(key)) return c.json({ error: "Not found." }, 404);
+  const range = c.req.header("range");
+  const object = await c.env.MEDIA.get(key, range ? { range: c.req.raw.headers } : {});
+  if (!object || !("body" in object)) return c.json({ error: "Not found." }, 404);
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("ETag", object.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "public, max-age=604800, immutable");
+  headers.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox");
+  headers.set("X-Content-Type-Options", "nosniff");
+  const span = object.range as { offset?: number; length?: number } | undefined;
+  if (range && span && typeof span.offset === "number") {
+    const length = span.length ?? object.size - span.offset;
+    headers.set("Content-Range", `bytes ${span.offset}-${span.offset + length - 1}/${object.size}`);
+    headers.set("Content-Length", String(length));
+    return new Response(object.body, { status: 206, headers });
+  }
+  headers.set("Content-Length", String(object.size));
+  return new Response(object.body, { headers });
+});
+
 app.all("/api/*", (c) => c.json({ error: "Not found." }, 404));
 
 app.on(["GET", "HEAD"], "*", (c) => c.env.ASSETS.fetch(c.req.raw));
+
+export { RoundWorkflow } from "./workflow";
 
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: AppEnv): Promise<void> {
     await ensureReady(env.DB);
-    await cleanup(env.DB);
+    await cleanup(env.DB, Date.now(), env.MEDIA);
   },
 };

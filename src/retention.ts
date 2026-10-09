@@ -1,6 +1,13 @@
-export async function cleanup(db: D1Database, now = Date.now()): Promise<void> {
+export async function cleanup(db: D1Database, now = Date.now(), media?: R2Bucket): Promise<void> {
   const cutoff = new Date(now - 30 * 86400000).toISOString();
   const expired = `SELECT id FROM jobs WHERE created_at < ? AND (mode = 'house' OR status IN ('captured', 'failed', 'draft'))`;
+  if (media) {
+    const jobs = await db.prepare(expired).bind(cutoff).all<{ id: string }>();
+    for (const job of jobs.results) {
+      const listed = await media.list({ prefix: `jobs/${job.id}/` });
+      if (listed.objects.length > 0) await media.delete(listed.objects.map((object) => object.key));
+    }
+  }
   await db.batch([
     db.prepare("UPDATE jobs SET status = 'failed' WHERE status = 'casting' AND created_at < ?").bind(new Date(now - 600000).toISOString()),
     db.prepare(`DELETE FROM entries WHERE job_id IN (${expired})`).bind(cutoff),

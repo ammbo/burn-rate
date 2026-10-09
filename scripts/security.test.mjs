@@ -11,37 +11,78 @@ const directory = await mkdtemp(join(tmpdir(), "burn-rate-tests-"));
 await build({
   stdin: { contents: 'export { default } from "./src/index.ts"; export { ensureReady, runRound } from "./src/game.ts"; export { reserveGeneration, hash } from "./src/access.ts"; export { cleanup } from "./src/retention.ts";', resolveDir: process.cwd() },
   outfile: join(directory, "worker.mjs"), bundle: true, platform: "node", format: "esm", target: "es2022",
+  plugins: [{ name: "workers-stub", setup(b) {
+    b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: "workers", namespace: "stub" }));
+    b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "export class WorkflowEntrypoint {}", loader: "js" }));
+  } }],
 });
 const { default: worker, ensureReady, runRound, reserveGeneration, hash, cleanup } = await import(join(directory, "worker.mjs"));
 let mf, env, pending, calls, emails;
+const realFetch = globalThis.fetch;
+
+function mediaBucket() {
+  const objects = new Map();
+  return {
+    async put(key, value, options) { objects.set(key, { value, type: options?.httpMetadata?.contentType }); },
+    async get(key) { return objects.get(key) ?? null; },
+    async list({ prefix }) { return { objects: [...objects.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key })) }; },
+    async delete(keys) { for (const key of [keys].flat()) objects.delete(key); },
+    objects,
+  };
+}
+
+async function openrouter(url, init) {
+  const path = new URL(url).pathname;
+  const input = JSON.parse(init.body);
+  calls.push({ path, model: input.model, input });
+  if (path.endsWith("/images")) return Response.json({ data: [{ b64_json: "AAAA", media_type: "image/png" }], usage: { cost: 0.04 } });
+  const name = input.response_format.json_schema.name;
+  const content = name === "plan"
+    ? { choice: input.messages.at(-1).content.match(/^- (\S+) \|/m)[1], reason: "Make something useful.", prompt: "Make a useful piece", take: "A clear idea",
+        pitch: "A useful piece for your brief.", bid: 1, reasoning: "Covers my costs." }
+    : name === "artifact" ? { eyebrow: "Test", title: "A clear idea", lede: "Here is the idea.", points: [{ h: "Try", body: "A concrete next step." }] }
+    : { title: "A bit", lines: ["One.", "Two.", "Three."], tag: "Done." };
+  return Response.json({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { cost: 0.01 } });
+}
 
 beforeEach(async () => {
   mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: "export default { fetch() { return new Response('ok'); } }", d1Databases: { DB: crypto.randomUUID() }, compatibilityDate: "2026-10-07" }));
   calls = [];
   pending = [];
+  globalThis.fetch = async (url, init) => String(url).startsWith("https://openrouter.ai/") ? openrouter(url, init) : realFetch(url, init);
   emails = [];
   env = {
     DB: await mf.getD1Database("DB"), DEMO_ACCESS_CODE: "private-test-invite-code", GENERATION_ENABLED: "true", PAYPAL_MODE: "sandbox",
     AUTH_SECRET: "private-test-auth-secret-at-least-32-characters", EMAIL_FROM: "signin@burnrateagents.com",
-    APP_ORIGIN: "https://burnrateagents.com",
+    APP_ORIGIN: "https://burnrating.com",
     EMAIL: { async send(message) { emails.push(message); return { messageId: crypto.randomUUID() }; } },
-    AI: { async run(model, input) {
-      calls.push({ model, input });
-      if (model.includes("flux")) return { image: "AAAA" };
-      const user = input.messages.at(-1).content;
-      if (user.startsWith("New job")) return { response: { choice: user.match(/^- (\w+):/m)[1], reason: "Make something useful." } };
-      return { response: { prompt: "Make a useful poster", take: "A clear idea", pitch: "A useful piece for your brief.", bid: 1,
-        reasoning: "Covers my costs.", work: { caption: "A useful poster", eyebrow: "Test", title: "A clear idea", lede: "Here is the idea.", points: [{ h: "Try", body: "A concrete next step." }] } } };
-    } },
+    OPENROUTER_API_KEY: "test-openrouter-key",
+    MEDIA: mediaBucket(),
     ASSETS: { fetch: () => new Response("static") },
   };
   await ensureReady(env.DB);
 });
-afterEach(async () => { await Promise.allSettled(pending); await mf.dispose(); });
+afterEach(async () => { await Promise.allSettled(pending); globalThis.fetch = realFetch; await mf.dispose(); });
 after(async () => { await rm(directory, { recursive: true, force: true }); });
 
+test("old domains and noncanonical URLs redirect before accessing app bindings", async () => {
+  const path = "/api/jobs/round-123?return=%2Fabout&x=1";
+  for (const origin of ["http://burnrating.com", "https://www.burnrating.com", "https://burnrateagents.com", "https://www.burnrateagents.com", "http://burnrateagents.com", "http://www.burnrateagents.com"]) {
+    for (const method of ["GET", "HEAD", "POST"]) {
+      const response = await worker.fetch(new Request(`${origin}${path}`, { method }), {}, {});
+      assert.equal(response.status, 308, `${method} ${origin}`);
+      assert.equal(response.headers.get("location"), `https://burnrating.com${path}`);
+    }
+  }
+  for (const origin of ["https://burnrating.com", "http://localhost:8787"]) {
+    const response = await worker.fetch(new Request(`${origin}/about`), env, {});
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("location"), null);
+  }
+});
+
 async function request(path, { method = "GET", body, cookie, origin, ip = "203.0.113.1" } = {}) {
-  return worker.fetch(new Request(`https://burnrateagents.com${path}`, {
+  return worker.fetch(new Request(`https://burnrating.com${path}`, {
     method, headers: { "content-type": "application/json", "cf-connecting-ip": ip, ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}) },
     ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
   }), env, { waitUntil(promise) { pending.push(promise); } });
@@ -185,7 +226,7 @@ test("rounds run once; only their owner can authorize or select, and settlement 
 
 test("atomic global reservations survive concurrent requests, new sessions, and round deletion", async () => {
   env.GENERATION_TOTAL_LIMIT = "1";
-  const req = new Request("https://burnrateagents.com/api/jobs");
+  const req = new Request("https://burnrating.com/api/jobs");
   const attempts = await Promise.allSettled(Array.from({ length: 12 }, (_, i) => reserveGeneration(env, req, `browser-${i}`, crypto.randomUUID())));
   assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
   await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 86400000).run();
@@ -199,7 +240,7 @@ test("daily, account and IP limits apply to house and PayPal requests; cooldown 
   await Promise.all(pending);
   await env.DB.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?").bind(jobId).run();
   await env.DB.prepare("UPDATE generation_requests SET created_at = ?").bind(Date.now() - 60000).run();
-  const req = new Request("https://burnrateagents.com/api/jobs", { headers: { "cf-connecting-ip": "203.0.113.1" } });
+  const req = new Request("https://burnrating.com/api/jobs", { headers: { "cf-connecting-ip": "203.0.113.1" } });
   const sessionId = (await env.DB.prepare("SELECT user_id FROM access_sessions LIMIT 1").first()).user_id;
   for (const key of ["GENERATION_ACCOUNT_LIMIT", "GENERATION_IP_LIMIT", "GENERATION_DAILY_LIMIT"]) {
     env[key] = "1";
@@ -212,25 +253,34 @@ test("paused or unconfigured generation fails closed before any AI call", async 
   const cookie = await login();
   env.GENERATION_ENABLED = "false";
   assert.equal((await request("/api/jobs", { method: "POST", body: job, cookie })).status, 503);
+  env.GENERATION_ENABLED = "true";
+  delete env.OPENROUTER_API_KEY;
+  assert.equal((await request("/api/jobs", { method: "POST", body: job, cookie })).status, 503);
   delete env.EMAIL;
   assert.equal((await request("/api/jobs", { method: "POST", body: job, cookie })).status, 503);
   assert.equal((await request("/api/session/email", { method: "POST", body: { email: "test@example.com" } })).status, 503);
   assert.equal(calls.length, 0);
 });
 
-test("image rounds are bounded to eight text and four image calls", async () => {
+test("image rounds are bounded to four plan calls and four image calls, each on the agent's own model", async () => {
   const cookie = await login();
-  await post(cookie, { ...job, category: "image" });
+  const { jobId } = await post(cookie, { ...job, category: "image" });
   await Promise.all(pending);
-  assert.equal(calls.filter((call) => call.model.includes("llama")).length, 8);
-  assert.equal(calls.filter((call) => call.model.includes("flux")).length, 4);
-  assert.ok(calls.every((call) => call.input.max_tokens <= 900 || call.input.steps <= 8));
+  const plans = calls.filter((call) => call.path.endsWith("/chat/completions"));
+  assert.equal(plans.length, 4);
+  assert.equal(new Set(plans.map((call) => call.model)).size, 4);
+  assert.equal(calls.filter((call) => call.path.endsWith("/images")).length, 4);
+  assert.ok(plans.every((call) => call.input.max_tokens <= 6000));
+  const view = await (await request(`/api/jobs/${jobId}`)).json();
+  assert.ok(view.entries.every((entry) => /^\/api\/media\//.test(entry.deliverable.src)));
+  assert.equal(env.MEDIA.objects.size, 4);
 });
 
 test("PayPal sandbox authorizes the ceiling and captures only the selected offer with final_capture", async () => {
   const originalFetch = globalThis.fetch;
   const paypalCalls = [];
   globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://openrouter.ai/")) return originalFetch(url, init);
     assert.equal(new URL(url).origin, "https://api-m.sandbox.paypal.com");
     const path = new URL(url).pathname;
     paypalCalls.push({ path, init });

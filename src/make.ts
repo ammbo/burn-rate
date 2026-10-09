@@ -1,4 +1,4 @@
-import type { Work } from "./ai";
+import type { Writing } from "./ai";
 import type { CategoryId, GenModel, Voice } from "./catalog";
 
 export interface Frame {
@@ -9,10 +9,10 @@ export interface Frame {
 
 export type Deliverable =
   | { kind: "image"; svg: string; caption: string; src?: string }
-  | { kind: "video"; title: string; frames: Frame[]; take: string }
+  | { kind: "video"; title: string; frames: Frame[]; take: string; src?: string }
   | { kind: "artifact"; eyebrow: string; title: string; lede: string; points: { h: string; body: string }[] }
-  | { kind: "asset"; name: string; svg: string; palette: { name: string; hex: string }[]; note: string }
-  | { kind: "standup"; mode: "bit" | "tape"; title: string; lines: string[]; tag: string; frames?: Frame[] };
+  | { kind: "asset"; name: string; svg: string; palette: { name: string; hex: string }[]; note: string; src?: string }
+  | { kind: "standup"; mode: "bit" | "tape"; title: string; lines: string[]; tag: string; frames?: Frame[]; src?: string };
 
 function hash(seed: string): number {
   let h = 2166136261;
@@ -553,45 +553,27 @@ function clipList(value: unknown, max: number, count: number): string[] {
   return Array.isArray(value) ? value.map((item) => clip(item, max)).filter(Boolean).slice(0, count) : [];
 }
 
-export function fromWork(voice: Voice, category: CategoryId, model: GenModel, brief: string, take: string, work: Work, src: string | null): Deliverable {
-  const fallback = produce(voice, category, model, brief, take);
-  if (work.kind === "image" && fallback.kind === "image") {
-    return { ...fallback, caption: clip(work.caption, 140) || fallback.caption, ...(src ? { src } : {}) };
-  }
-  if (work.kind === "video") {
-    const beats = clipList(work.beats, 120, 4);
-    if (beats.length < 4) return fallback;
-    const times = ["0:00", "0:02", "0:05", "0:07"];
-    return { kind: "video", title: clip(work.title, 90) || thing(brief), take, frames: beats.map((beat, i) => scene(voice, beat, times[i] ?? "0:00", true)) };
-  }
-  if (work.kind === "artifact") {
-    const points = Array.isArray(work.points)
-      ? work.points.map((point) => ({ h: clip(point?.h, 60), body: clip(point?.body, 240) })).filter((point) => point.h && point.body).slice(0, model.id === "deck" ? 5 : 3)
+export function fromWriting(brief: string, writing: Writing): Deliverable | null {
+  if (writing.kind === "artifact") {
+    const points = Array.isArray(writing.points)
+      ? writing.points.map((point) => ({ h: clip(point?.h, 60), body: clip(point?.body, 300) })).filter((point) => point.h && point.body).slice(0, 5)
       : [];
-    if (points.length === 0) return fallback;
-    return { kind: "artifact", eyebrow: clip(work.eyebrow, 40), title: clip(work.title, 90) || thing(brief), lede: clip(work.lede, 240), points };
+    if (points.length === 0) return null;
+    return { kind: "artifact", eyebrow: clip(writing.eyebrow, 40), title: clip(writing.title, 90) || thing(brief), lede: clip(writing.lede, 300), points };
   }
-  if (work.kind === "asset") {
-    const palette = Array.isArray(work.palette)
-      ? work.palette.map((color) => ({ name: clip(color?.name, 20), hex: clip(color?.hex, 7) })).filter((color) => /^#[0-9a-f]{6}$/i.test(color.hex)).slice(0, 3)
-      : [];
-    const name = clip(work.name, 14).replace(/[<>&"']/g, "");
-    if (!name || palette.length < 3) return fallback;
-    return asset(voice, brief, model.id === "kit", { name, palette, note: clip(work.note, 280) });
+  const lines = clipList(writing.lines, 240, 8);
+  if (lines.length < 3) return null;
+  return { kind: "standup", mode: "bit", title: clip(writing.title, 80) || "Untitled", lines, tag: clip(writing.tag, 60) };
+}
+
+export function fromMedia(category: CategoryId, kind: "image" | "video", src: string, take: string, brief: string): Deliverable {
+  const title = clip(take, 90) || thing(brief);
+  if (kind === "video") {
+    if (category === "standup") return { kind: "standup", mode: "tape", title, lines: [], tag: "", src };
+    return { kind: "video", title, take: title, frames: [], src };
   }
-  if (work.kind === "standup") {
-    const lines = clipList(work.lines, 200, 7);
-    if (lines.length < 3) return fallback;
-    const title = clip(work.title, 80) || "Untitled";
-    const tag = clip(work.tag, 60);
-    if (model.id === "tape") {
-      const times = ["0:02", "0:08", "0:16", "0:24"];
-      const frames = lines.slice(0, 4).map((line, i) => scene(voice, line, times[i] ?? "0:00", false));
-      return { kind: "standup", mode: "tape", title, lines, tag, frames };
-    }
-    return { kind: "standup", mode: "bit", title, lines, tag };
-  }
-  return fallback;
+  if (category === "asset") return { kind: "asset", name: title, svg: "", palette: [], note: "", src };
+  return { kind: "image", svg: "", caption: title, src };
 }
 
 export function writePitch(voice: Voice, brief: string, bid: number, model: GenModel): string {

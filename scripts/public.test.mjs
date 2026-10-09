@@ -14,8 +14,8 @@ test("public pages ship unique metadata, crawlable copy, and valid structured da
     assert.match(response.headers.get("content-type"), /text\/html/);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
     const html = await response.text();
-    assert.ok(html.includes(`rel="canonical" href="https://burnrateagents.com${path}"`), path);
-    assert.ok(html.includes(`property="og:url" content="https://burnrateagents.com${path}"`), path);
+    assert.ok(html.includes(`rel="canonical" href="https://burnrating.com${path}"`), path);
+    assert.ok(html.includes(`property="og:url" content="https://burnrating.com${path}"`), path);
     assert.match(html, /property="og:image:width" content="1200"/);
     assert.match(html, /property="og:image:height" content="630"/);
     assert.match(html, /name="twitter:card" content="summary_large_image"/);
@@ -37,7 +37,7 @@ test("discovery files advertise only real public documents", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /xml/);
   const xml = await response.text();
-  assert.deepEqual([...xml.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => match[1]), publicPaths.map((path) => `https://burnrateagents.com${path}`).sort((a, b) => {
+  assert.deepEqual([...xml.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => match[1]), publicPaths.map((path) => `https://burnrating.com${path}`).sort((a, b) => {
     const order = ["/", "/how-it-works", "/about", "/privacy", "/terms"];
     return order.indexOf(new URL(a).pathname) - order.indexOf(new URL(b).pathname);
   }));

@@ -88,7 +88,8 @@ async function drawSignIn(token) {
 const usd = (value) => {
   const amount = Number(value) || 0;
   const sign = amount < 0 ? "−" : "";
-  return `${sign}$${Math.abs(amount).toFixed(2)}`;
+  const abs = Math.abs(amount);
+  return `${sign}$${abs.toFixed(abs > 0 && abs < 0.01 ? 3 : 2)}`;
 };
 
 const esc = (value) =>
@@ -122,10 +123,10 @@ const jobStatusLabel = (status) =>
   ({ casting: "Being made", judging: "Waiting on the buyer", captured: "Paid", failed: "Broke" })[status] || status;
 
 const laneName = (id) =>
-  ({ image: "Image", video: "Storyboard", artifact: "Memo / deck", asset: "Brand kit", standup: "Comedy bit" })[id] || id;
+  ({ image: "Image", video: "Video clip", artifact: "Memo / deck", asset: "Logo", standup: "Comedy bit" })[id] || id;
 
 const laneBlurb = (id) =>
-  ({ image: "A generated still, poster, or illustration.", video: "An eight-second storyboard shown as timed frames. No rendered video file.", artifact: "A one-page memo or short deck, displayed in your browser.", asset: "A wordmark or mini brand kit with a palette and usage notes.", standup: "A written comedy bit, sometimes paired with storyboard frames. No recorded performance." })[id] || "";
+  ({ image: "A generated still, poster, or illustration.", video: "A generated video clip of up to eight seconds. No rendered video file.", artifact: "A one-page memo or short deck, displayed in your browser.", asset: "A wordmark or mini brand kit with a palette and usage notes.", standup: "A written comedy bit, or a filmed comedy tape. No recorded performance." })[id] || "";
 
 function toast(message) {
   toastEl.textContent = message;
@@ -432,15 +433,27 @@ function svgImage(svg, caption = "Generated artwork") {
     ? `<img src="data:image/svg+xml,${encodeURIComponent(svg)}" alt="${esc(caption)}">` : "";
 }
 
+function mediaSrc(src) {
+  if (typeof src !== "string") return null;
+  if (/^\/api\/media\/[A-Za-z0-9-]{1,64}\/[A-Za-z0-9-]{1,64}\.(png|jpeg|webp|svg|mp4)$/.test(src)) return src;
+  if (src.length <= 2_000_030 && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(src)) return src;
+  return null;
+}
+
+function videoHTML(src, label) {
+  return `<video src="${esc(src)}" controls playsinline loop preload="metadata" aria-label="${esc(label)}"></video>`;
+}
+
 function workHTML(deliverable) {
   if (!deliverable) return "";
+  const src = mediaSrc(deliverable.src);
   if (deliverable.kind === "image") {
-    const safeImage = typeof deliverable.src === "string" && deliverable.src.length <= 2_000_030 && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(deliverable.src);
-    const art = safeImage ? `<img src="${esc(deliverable.src)}" alt="${esc(deliverable.caption)}">` : svgImage(deliverable.svg, deliverable.caption);
+    const art = src ? `<img src="${esc(src)}" alt="${esc(deliverable.caption)}">` : svgImage(deliverable.svg, deliverable.caption);
     return `<div class="stage-art">${art}<p class="tag">${esc(deliverable.caption)}</p></div>`;
   }
   if (deliverable.kind === "video") {
     const note = deliverable.take ? `<p class="tag">${esc(deliverable.take)}</p>` : "";
+    if (src && src.endsWith(".mp4")) return `<div class="stage-art">${videoHTML(src, deliverable.title)}</div>${note}`;
     return `${playerHTML(deliverable.frames, true)}${note}`;
   }
   if (deliverable.kind === "artifact") {
@@ -452,7 +465,9 @@ function workHTML(deliverable) {
     </article>`;
   }
   if (deliverable.kind === "asset") {
-    return `<div class="stage-art">${svgImage(deliverable.svg, "Generated wordmark")}
+    const mark = src ? `<img src="${esc(src)}" alt="${esc(deliverable.name || "Generated logo")}">` : svgImage(deliverable.svg, "Generated wordmark");
+    return `<div class="stage-art">${mark}
+      ${src && deliverable.name ? `<p class="tag">${esc(deliverable.name)}</p>` : ""}
       <div class="swatches">${deliverable.palette.map((swatch) => `<div class="swatch" style="background:${/^#[0-9a-f]{6}$/i.test(swatch.hex) ? swatch.hex : "#777777"}">${esc(swatch.name)}<br>${esc(swatch.hex)}</div>`).join("")}</div>
       <p>${esc(deliverable.note)}</p>
     </div>`;
@@ -463,6 +478,9 @@ function workHTML(deliverable) {
     <ol>${deliverable.lines.map((line) => `<li>${esc(line)}</li>`).join("")}</ol>
     <p class="tagline">${esc(deliverable.tag)}</p>
   </div>`;
+  if (deliverable.mode === "tape" && src && src.endsWith(".mp4")) {
+    return `<div class="stage-art">${videoHTML(src, deliverable.title)}</div>${deliverable.lines.length ? lines : `<p class="tag">${esc(deliverable.title)}</p>`}`;
+  }
   if (deliverable.mode === "tape" && deliverable.frames) return `${playerHTML(deliverable.frames, false)}${lines}`;
   return lines;
 }
@@ -562,7 +580,7 @@ async function drawRound(id) {
       : `You held ${usd(job.offer)}. They're working from what you wrote.`;
     body = `<div class="working">
       <div class="meter" aria-hidden="true"><span style="width:${pct}%"></span></div>
-      <p class="fine">${total === 0 ? "Sitting down with your project." : `${finished} of ${total} have decided.`}</p>
+      <p class="fine">${total === 0 ? "Sitting down with your project." : `${finished} of ${total} are done.`}${job.category === "video" ? " Video takes a few minutes to render." : ""}</p>
     </div>`;
   } else if (job.status === "failed") {
     kicker = `${kicker} · Stopped`;
@@ -663,7 +681,7 @@ async function drawRound(id) {
   if (job.status === "casting" || job.status === "draft") {
     poll = window.setTimeout(() => {
       if ((location.hash || "").includes(id)) drawRound(id).catch((error) => toast(error.message));
-    }, 700);
+    }, 2000);
   }
 }
 

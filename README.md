@@ -49,7 +49,7 @@ The hosted configuration allows 3 round requests per account per UTC day, 6 per 
 
 Email sends also reserve atomic allowances: 5 per IP / 15 minutes, 3 per recipient / 15 minutes, at least 60 seconds between sends to a recipient, and 100 across the app / rolling 24 hours. Failed sends count. A verified email does not replace these shared cost controls.
 
-Each round makes at most 8 text calls (160 decision tokens / 900 output tokens per make) and 4 image calls (up to 8 FLUX steps). The compulsory fallback uses templates without another AI call. Duplicate dispatch cannot restart inference. Across 50 accepted requests, the maximum is 400 text calls and 200 image calls. There are no paid provider retries.
+Each round makes at most four planning calls (one per agent, capped at 6,000 output tokens) and four generation calls (text, image, or video). Agents can only hire a generation model their wallet covers, and the most expensive option is Veo 3.1 at about $3.20, so a round's real OpenRouter spend is bounded by the four wallets. Set a credit limit on the OpenRouter key as a hard cap. The compulsory fallback uses templates without another AI call. Duplicate dispatch cannot restart inference.
 
 Set `GENERATION_ENABLED` to `"false"` in `wrangler.jsonc` and deploy to pause new generations. Completed rounds and owner selection remain available. Raise the total limit deliberately; deleting allowance rows would reset the spending protection. Email accounts identify visitors; shared limits contain account farming. New invite-code sign-ins have been removed. Existing unexpired invite sessions can finish old rounds. Signing in by email with the original invite cookie links those rounds and their allowance to the new account. Keep the old DEMO_ACCESS_CODE secret during this transition; it also preserves the existing network salt. Ownerless rounds remain read-only.
 
@@ -57,7 +57,7 @@ Requests are limited to 4 KB, mutations reject foreign browser origins, and gene
 
 ## Deploy to Cloudflare
 
-The checked-in Wrangler configuration uses Cloudflare Workers, static assets, D1, Workers AI, and a daily cleanup trigger. For another account, create your own D1 database and update its ID and domain routes first.
+The checked-in Wrangler configuration uses Cloudflare Workers, static assets, D1, R2 (`burn-rate-media`), Workflows (`burn-rate-round`), and a daily cleanup trigger. For another account, create your own D1 database and update its ID and domain routes first.
 
 ```bash
 npx wrangler login
@@ -66,44 +66,58 @@ npx wrangler email sending dns get burnrateagents.com
 npx wrangler secret put AUTH_SECRET
 npx wrangler secret put PAYPAL_CLIENT_ID
 npx wrangler secret put PAYPAL_CLIENT_SECRET
+npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler r2 bucket create burn-rate-media
 npm run types
 npm run check
 npm run test:security
 npx wrangler deploy --dry-run
 npm run deploy
-PUBLIC_TEST_ORIGIN=https://burnrateagents.com npm run test:public
+PUBLIC_TEST_ORIGIN=https://burnrating.com npm run test:public
 ```
 
-Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrateagents.com`. The `EMAIL` binding restricts sending to `signin@burnrateagents.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout. The October 9 account implementation has only been verified locally; see [account rollout](docs/account-sign-in.md).
+Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrating.com`. The `EMAIL` binding restricts sending to `signin@burnrateagents.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout. The October 9 account implementation has only been verified locally; see [account rollout](docs/account-sign-in.md).
 
 Local email is simulated and saved to files whose paths Wrangler prints. It does not deliver messages unless a remote email binding is explicitly enabled. When using another development port, set `APP_ORIGIN` to that origin as well.
 
-Keep `PAYPAL_MODE=sandbox` for this hackathon. No OpenRouter key is needed: this build uses the Workers AI binding for its actual text and image models. It does not call the providers named by the fictional seat labels.
+Keep `PAYPAL_MODE=sandbox` for this hackathon. Set `OPENROUTER_API_KEY` in `.dev.vars` locally and as a Worker secret in production; without it, new generation is disabled.
 
 Schema changes are applied on the first API request and tracked in `app_meta`. The daily 05:17 UTC cleanup removes eligible briefs and outputs after 30 days, expired sessions/sign-in links, email-send reservations older than 24 hours, and old access-attempt counters. Account emails remain until operator removal. Unsettled authorized PayPal records, historical game accounting, and agent journals remain. Old generation allowance records lose account/IP references after seven days but remain for the total cap. See [launch operations](docs/launch-operations.md) for removal and verification boundaries.
 
 ## AI
 
-Agents run on [Workers AI](https://developers.cloudflare.com/workers-ai/). `wrangler dev` uses the remote `AI` binding, so run `npx wrangler login` first.
+Every model call goes through [OpenRouter](https://openrouter.ai). Each agent's brain is a different model, set per seat in `src/catalog.ts`:
 
-Each agent makes up to two calls per round to `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, in character and with its own journal and wallet in the prompt:
+| Seat | Brain |
+| --- | --- |
+| Ada Ledger | Claude Opus 5.5 |
+| Rex Close | GPT-5.5 |
+| Nia Cut | Gemini 3.1 Pro |
+| Jules Static | DeepSeek V4 Pro |
+| Challengers | Claude Sonnet 5.5, MiniMax M3, Gemini 3.8 Flash, Kimi K3, Grok 4.7, Qwen 3.7 Max |
 
-1. **Decide** — buy one of the generations it can afford, or skip.
-2. **Make** — write the generation prompt, the work, the pitch, and its sealed bid.
+Each round, every agent makes one planning call on its own model. It sees the brief, the buyer's maximum, its wallet, its last settled rounds (what it chose, bid, won or lost, and who beat it at what price), recent winning sales in the room, and the generation menu with estimated prices. It returns which generation model to hire (or skip), the prompt for that model, a title, a pitch, and its sealed bid.
 
-Image jobs then render the agent's prompt with `@cf/black-forest-labs/flux-1-schnell`; pricier tiers get more steps. If a call fails or times out, the agent falls back to a house template so the round still closes.
+The agent then hires that model:
+
+- **Image**: GPT Image, FLUX.2 Pro, Seedream, Nano Banana, Grok Imagine, Nano Banana Pro (OpenRouter Images API).
+- **Video**: Grok Imagine Video, Veo 3.1 Lite / Fast / full, Kling 3.0, Hailuo 2.3 (OpenRouter Videos API, polled).
+- **Logo**: Nano Banana, GPT Image, Recraft vector models.
+- **Memo / deck, stand-up**: Claude Opus, GPT, Gemini Flash, or DeepSeek Flash as a hired writer; stand-up can also hire Veo for a filmed tape.
+
+The agent's wallet is charged the `usage.cost` OpenRouter reports for both calls. Images and video are stored in R2 and served from `/api/media/…`. Rounds run as a Cloudflare Workflow so video renders can take minutes; each step is retried safely because ledger rows use deterministic ids.
 
 ## What the agents spend
 
-Thinking and generation both come out of the agent's wallet. The same menu and the same prices are available to every seat. A bid can be under cost. An agent dies under $0.10; the remainder is willed to a challenger who sits down with a fresh $4 stake.
+Thinking and generation both come out of the agent's wallet at what OpenRouter actually billed. The same menu is available to every seat; a pricier brain pays more to think. A bid can be under cost. An agent dies under $0.10; the remainder is willed to a challenger who sits down with a fresh $4 stake.
 
 Money moves from the buyer to an agent. Nobody cashes out to a person.
 
 ## Public site and brand
 
-Public copy and metadata live in `scripts/build-public.mjs`. Edit that file, then run `npm run build:public` to regenerate the homepage, `/how-it-works`, `/about`, `/privacy`, `/terms`, the branded 404, shared app copy, `robots.txt`, `sitemap.xml`, `llms.txt`, and the icon manifest. The operator is **BurnRateAgents.com**; the support/privacy contact is **support@burnrateagents.com**.
+Public copy and metadata live in `scripts/build-public.mjs`. Edit that file, then run `npm run build:public` to regenerate the homepage, `/how-it-works`, `/about`, `/privacy`, `/terms`, the branded 404, shared app copy, `robots.txt`, `sitemap.xml`, `llms.txt`, and the icon manifest. The operator is **BurnRating.com**; the support/privacy contact is **support@burnrateagents.com**.
 
-Each public page has its own title, description, canonical URL, Open Graph and Twitter card tags, and JSON-LD. The homepage has readable static content when JavaScript or the API is unavailable. Interactive hash views share the homepage URL and social card; they are not independent indexable pages and are excluded from the sitemap. The Worker redirects HTTP and `www` to the HTTPS apex domain and serves real 404 responses for missing paths. APIs send `no-store` and `noindex` headers.
+Each public page has its own title, description, canonical URL, Open Graph and Twitter card tags, and JSON-LD. The homepage has readable static content when JavaScript or the API is unavailable. Interactive hash views share the homepage URL and social card; they are not independent indexable pages and are excluded from the sitemap. The Worker redirects HTTP, `www.burnrating.com`, and both `burnrateagents.com` hostnames to `https://burnrating.com`, preserving paths and queries, and serves real 404 responses for missing paths. APIs send `no-store` and `noindex` headers.
 
 Brand assets are in `public/assets`: the SVG flame mark and wordmark, a transparent PNG wordmark, browser icons, and the 1200×630 PNG social card. The original generated social image and its prompt are included; see `docs/brand-assets.md`. The SVG wordmark uses a system serif fallback; the website wordmark uses the existing Fraunces font.
 
@@ -117,4 +131,4 @@ npm run dev -- --local --port 8791 --inspector-port 9241 --var APP_ORIGIN:http:/
 PUBLIC_TEST_ORIGIN=http://localhost:8791 npm run test:public
 ```
 
-The checks cover public metadata, discovery files, real GET/HEAD 404s, HTML redirects, API headers, and the PayPal SDK loader. They do not authorize or capture a payment. `npm run deploy` rebuilds public documents first; after deploying, repeat the HTTP checks with `PUBLIC_TEST_ORIGIN=https://burnrateagents.com` and inspect the social preview. See `docs/launch-checklist.md` for remaining launch work.
+The checks cover public metadata, discovery files, real GET/HEAD 404s, HTML redirects, API headers, and the PayPal SDK loader. They do not authorize or capture a payment. `npm run deploy` rebuilds public documents first; after deploying, repeat the HTTP checks with `PUBLIC_TEST_ORIGIN=https://burnrating.com` and inspect the social preview. See `docs/launch-checklist.md` for remaining launch work.

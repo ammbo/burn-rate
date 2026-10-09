@@ -31,7 +31,7 @@ Read-only account checks on October 9 found Cloudflare Email Sending already ava
 Before deploying:
 
 1. Enable Cloudflare Email Sending for `burnrateagents.com`, then verify its sending DNS/authentication and settings. Keep support-mail routing separate from this outbound sender setup.
-2. Set a new random `AUTH_SECRET` Worker secret of at least 32 characters. Keep the existing `DEMO_ACCESS_CODE` during migration. Verify `APP_ORIGIN=https://burnrateagents.com` so links always point to the canonical site.
+2. Set a new random `AUTH_SECRET` Worker secret of at least 32 characters. Keep the existing `DEMO_ACCESS_CODE` during migration. Verify `APP_ORIGIN=https://burnrating.com` so links always point to the canonical site.
 3. Run type, security, and public-page checks and a Wrangler dry run; deploy the reviewed changes.
 4. Request a sign-in email to an address controlled by the operator. Check actual inbox delivery, sender authentication, expiry, browser binding, and one-time confirmation. Sign out and back in with the same email and verify project ownership/allowance persist.
 5. Verify anonymous generation still receives 401 and another account cannot authorize or choose a winner for the operator’s project. Keep PayPal sandbox approval/capture verification as its own gate.

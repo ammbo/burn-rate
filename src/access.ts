@@ -11,6 +11,7 @@ export type AccessEnv = Pick<Env, "DB"> & Partial<Pick<Env, "EMAIL">> & {
   GENERATION_TOTAL_LIMIT?: string;
   GENERATION_SESSION_LIMIT?: string;
   GENERATION_IP_LIMIT?: string;
+  OPENROUTER_API_KEY?: string;
 };
 
 export const ACCESS_SCHEMA = [
@@ -67,7 +68,7 @@ function equalHash(a: string, b: string): boolean {
 }
 
 export function generationEnabled(env: AccessEnv): boolean {
-  return emailConfigured(env) && env.GENERATION_ENABLED === "true";
+  return emailConfigured(env) && env.GENERATION_ENABLED === "true" && Boolean(env.OPENROUTER_API_KEY);
 }
 
 export function assertGenerationEnabled(env: AccessEnv): void {

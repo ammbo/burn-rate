@@ -1,5 +1,26 @@
 # Deployment verification
 
+## Domain migration — October 9, 2026
+
+The canonical site is now `https://burnrating.com`. Wrangler 4.149.0 deployed version `5a126c13-7940-4cb4-b82f-a2175418377c` to `burnrating.com`, `www.burnrating.com`, `burnrateagents.com`, and `www.burnrateagents.com`.
+
+This deployment started from the downloaded live Worker version `90593c3d-9031-41fa-9f24-9c7defd070c0` and its live public assets. Only domain routing, canonical/discovery URLs, and the operator domain changed. The in-progress local OpenRouter, Workflow, R2, and email-account changes were not released. The existing D1 database, Workers AI binding, secrets, quotas, sandbox payment mode, and cleanup schedule were retained.
+
+The new domain was provisioned and checked first, with the old apex still serving the app. After those checks passed, the old domains were switched to permanent 308 redirects. Redirects retain paths and query strings and preserve HTTP methods. `www.burnrating.com` and HTTP also redirect to the HTTPS apex.
+
+Verification:
+
+- TypeScript and all 16 local security tests passed, including redirects before binding access and unchanged local-development routing.
+- The exact downloaded production bundle passed independent redirect and canonical-host checks; the isolated Wrangler deployment passed its dry run.
+- All eight public checks passed on the new domain before the final redirect switch: page metadata, discovery files, 404s, HTML aliases, API headers, disclosure placement, anonymous-generation rejection, and the local PayPal-loader check.
+- After the final deployment, 23 live checks passed, including GET/HEAD/POST redirects for six noncanonical origins, canonical pages, API health/config, and following an old-domain redirect to a 200 response.
+- Cloudflare and Google public DNS returned the new apex records. The machine initially cached the missing apex; live tests used fresh public DNS while retaining normal HTTPS certificate verification.
+- No AI round, sign-in email, payment authorization, or capture was initiated by this migration.
+
+The isolated deployment files and raw verification results are in ignored `.wrangler/burnrating-migration/`. The working source, Wrangler routes, future sign-in `APP_ORIGIN`, public generator, and tests were updated for the new canonical domain. The product name remains Burn Rate, and existing sender/support email addresses remain on `burnrateagents.com`; new-domain mailboxes were not configured.
+
+Browser cookies and local drafts are scoped to their original domain. They were not transferred. A new session does not claim old cookie-owned rounds, although all existing database records remain available under the same public round URLs.
+
 ## Application hardening pass — October 8, 2026
 
 Deployed the full Worker and assets with Wrangler 4.149.0 to both custom domains. Worker version `90593c3d-9031-41fa-9f24-9c7defd070c0`; startup 3 ms. The daily cleanup trigger is `17 5 * * *` (05:17 UTC). PayPal remains `sandbox`.

@@ -314,7 +314,7 @@ textarea { min-height: 140px; resize: vertical; }
 .price { font-family: Fraunces, serif; font-size: 40px; margin: 8px 0; }
 .margin.up { color: var(--mint); }
 .margin.down { color: var(--rose); }
-.stage-art, .stage-art svg, .stage-art img, .player svg { width: 100%; height: auto; display: block; border-radius: 12px; }
+.stage-art, .stage-art svg, .stage-art img, .stage-art video, .player svg { width: 100%; height: auto; display: block; border-radius: 12px; }
 .player { display: grid; gap: 8px; }
 .player .frame { display: none; }
 .player .frame.on { display: block; }

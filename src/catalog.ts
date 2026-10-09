@@ -17,7 +17,7 @@ export const CATEGORIES = [
     label: "Video",
     kicker: "Clip",
     suggestion: 4,
-    blurb: "A short clip. Eight seconds, storyboarded and timed.",
+    blurb: "A short generated clip, up to eight seconds.",
     placeholder: "Eight seconds of a raccoon opening a tiny briefcase",
   },
   {
@@ -55,6 +55,61 @@ export interface GenModel {
   cost: number;
 }
 
+export type MakerKind = "text" | "image" | "video";
+
+export interface Maker {
+  id: string;
+  label: string;
+  kind: MakerKind;
+  estimate: number;
+  note: string;
+  video?: { duration: number; resolution?: string; audio?: boolean };
+}
+
+const WRITERS: Maker[] = [
+  { id: "anthropic/claude-opus-5.5", label: "Claude Opus 5.5", kind: "text", estimate: 0.04, note: "Strongest writer on the menu." },
+  { id: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol", kind: "text", estimate: 0.02, note: "Sharp, reliable writer." },
+  { id: "google/gemini-3.8-flash", label: "Gemini 3.8 Flash", kind: "text", estimate: 0.006, note: "Fast and cheap." },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", kind: "text", estimate: 0.003, note: "Nearly free." },
+];
+
+const TAPES: Maker[] = [
+  { id: "google/veo-3.1-lite", label: "Veo 3.1 Lite tape", kind: "video", estimate: 0.4, note: "8s, 720p, with sound. A comedian delivering one line.", video: { duration: 8, resolution: "720p", audio: true } },
+  { id: "google/veo-3.1-fast", label: "Veo 3.1 Fast tape", kind: "video", estimate: 0.8, note: "8s, 720p, with sound. Better performance.", video: { duration: 8, resolution: "720p", audio: true } },
+];
+
+export const MAKERS: Record<CategoryId, Maker[]> = {
+  image: [
+    { id: "openai/gpt-image-1-mini", label: "GPT Image 1 Mini", kind: "image", estimate: 0.01, note: "Cheap, decent." },
+    { id: "black-forest-labs/flux.2-pro", label: "FLUX.2 Pro", kind: "image", estimate: 0.03, note: "Photoreal, strong composition." },
+    { id: "bytedance-seed/seedream-5-0-lite", label: "Seedream 5 Lite", kind: "image", estimate: 0.035, note: "Stylized, vivid." },
+    { id: "google/gemini-nano-banana-2.1", label: "Nano Banana 2.1", kind: "image", estimate: 0.04, note: "Great text rendering and layout." },
+    { id: "x-ai/grok-imagine-image-2.0", label: "Grok Imagine Image 2", kind: "image", estimate: 0.04, note: "Bold, punchy." },
+    { id: "openai/gpt-image-2", label: "GPT Image 2", kind: "image", estimate: 0.12, note: "Excellent prompt following and typography." },
+    { id: "google/gemini-3-pro-image", label: "Nano Banana Pro", kind: "image", estimate: 0.14, note: "Top quality, best for posters with text." },
+  ],
+  video: [
+    { id: "x-ai/grok-imagine-video-1.5-lite", label: "Grok Imagine Video Lite", kind: "video", estimate: 0.12, note: "6s, 480p, silent. Cheap and rough.", video: { duration: 6, resolution: "480p" } },
+    { id: "google/veo-3.1-lite", label: "Veo 3.1 Lite", kind: "video", estimate: 0.4, note: "8s, 720p, with sound.", video: { duration: 8, resolution: "720p", audio: true } },
+    { id: "kwaivgi/kling-v3.0-std", label: "Kling 3.0 Standard", kind: "video", estimate: 0.42, note: "5s, silent, strong motion.", video: { duration: 5, resolution: "720p", audio: false } },
+    { id: "minimax/hailuo-2.3", label: "Hailuo 2.3", kind: "video", estimate: 0.49, note: "6s, silent, cinematic.", video: { duration: 6 } },
+    { id: "google/veo-3.1-fast", label: "Veo 3.1 Fast", kind: "video", estimate: 0.8, note: "8s, 720p, with sound. High quality.", video: { duration: 8, resolution: "720p", audio: true } },
+    { id: "google/veo-3.1", label: "Veo 3.1", kind: "video", estimate: 3.2, note: "8s, with sound. The best clip money buys here.", video: { duration: 8, audio: true } },
+  ],
+  artifact: WRITERS,
+  asset: [
+    { id: "google/gemini-nano-banana-2.1", label: "Nano Banana 2.1", kind: "image", estimate: 0.04, note: "Raster logo, good lettering." },
+    { id: "recraft/recraft-v4.1-vector", label: "Recraft V4.1 Vector", kind: "image", estimate: 0.08, note: "True SVG vector logo." },
+    { id: "openai/gpt-image-2", label: "GPT Image 2", kind: "image", estimate: 0.12, note: "Precise typography." },
+    { id: "recraft/recraft-v4.1-pro-vector", label: "Recraft V4.1 Pro Vector", kind: "image", estimate: 0.3, note: "Premium SVG vector logo." },
+  ],
+  standup: [...WRITERS, ...TAPES],
+};
+
+export function makerFor(category: CategoryId, id: string): Maker | undefined {
+  return MAKERS[category].find((maker) => maker.id === id);
+}
+
 export const MENU: Record<CategoryId, GenModel[]> = {
   image: [
     { id: "sketch", label: "Ink sketch", cost: 0.06 },
@@ -90,6 +145,7 @@ export interface Seat {
   id?: string;
   name: string;
   model: string;
+  brain: string;
   voice: Voice;
   tagline: string;
   journal: string;
@@ -99,7 +155,8 @@ export const OPENING: Seat[] = [
   {
     id: "ada",
     name: "Ada Ledger",
-    model: "Claude",
+    model: "Claude Opus 5.5",
+    brain: "anthropic/claude-opus-5.5",
     voice: "deadpan",
     tagline: "Prices the punchline.",
     journal:
@@ -108,7 +165,8 @@ export const OPENING: Seat[] = [
   {
     id: "rex",
     name: "Rex Close",
-    model: "GPT",
+    model: "GPT-5.5",
+    brain: "openai/gpt-5.5",
     voice: "closer",
     tagline: "Leaves with the order.",
     journal:
@@ -117,7 +175,8 @@ export const OPENING: Seat[] = [
   {
     id: "nia",
     name: "Nia Cut",
-    model: "Gemini",
+    model: "Gemini 3.1 Pro",
+    brain: "google/gemini-3.1-pro-preview",
     voice: "cutter",
     tagline: "Cuts to the joke.",
     journal:
@@ -126,7 +185,8 @@ export const OPENING: Seat[] = [
   {
     id: "jules",
     name: "Jules Static",
-    model: "Llama",
+    model: "DeepSeek V4 Pro",
+    brain: "deepseek/deepseek-v4-pro",
     voice: "mic",
     tagline: "Works cheap, swings hard.",
     journal:
@@ -137,47 +197,57 @@ export const OPENING: Seat[] = [
 export const CHALLENGERS: Seat[] = [
   {
     name: "June Audit",
-    model: "Claude Haiku",
+    model: "Claude Sonnet 5.5",
+    brain: "anthropic/claude-sonnet-5.5",
     voice: "deadpan",
     tagline: "Counts the laughs. Then cuts one.",
     journal: "Inherited a chair and a grudge against sloppy margins. Bid where the work clears.",
   },
   {
     name: "Salvage Kim",
-    model: "GPT mini",
+    model: "MiniMax M3",
+    brain: "minimax/minimax-m3",
     voice: "closer",
     tagline: "Sells the leftover heat.",
     journal: "The last closer died of confidence. I will charge for the close and keep a dollar back.",
   },
   {
     name: "Iris Reel",
-    model: "Gemini Flash",
+    model: "Gemini 3.8 Flash",
+    brain: "google/gemini-3.8-flash",
     voice: "cutter",
     tagline: "One take, no apology.",
     journal: "Pictures first. If the offer cannot feed a clip, ship the animatic and say so.",
   },
   {
     name: "Penny Heckle",
-    model: "Mistral",
+    model: "Kimi K3",
+    brain: "moonshotai/kimi-k3",
     voice: "mic",
     tagline: "Showed up with someone else's drink.",
     journal: "Be the cheap funny one. Let the serious models invoice themselves to death.",
   },
   {
     name: "Otto Margin",
-    model: "Grok",
+    model: "Grok 4.7",
+    brain: "x-ai/grok-4.7",
     voice: "deadpan",
     tagline: "Here for the spread, not the applause.",
     journal: "Applause is not a line item. Margin is. Stand-up still counts if the tag lands.",
   },
   {
     name: "Bess Underbid",
-    model: "Qwen",
+    model: "Qwen 3.7 Max",
+    brain: "qwen/qwen3.7-max",
     voice: "mic",
     tagline: "Will work for the story and also for money.",
     journal: "Underbid until it hurts, then underbid once more. Dying funny is still dying.",
   },
 ];
+
+export function seatNamed(name: string): Seat | undefined {
+  return [...OPENING, ...CHALLENGERS].find((seat) => name === seat.name || name.startsWith(`${seat.name} `));
+}
 
 export function isCategory(value: string): value is CategoryId {
   return CATEGORIES.some((category) => category.id === value);

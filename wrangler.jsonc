@@ -12,6 +12,8 @@
     }
   },
   "routes": [
+    { "pattern": "burnrating.com", "custom_domain": true },
+    { "pattern": "www.burnrating.com", "custom_domain": true },
     { "pattern": "burnrateagents.com", "custom_domain": true },
     { "pattern": "www.burnrateagents.com", "custom_domain": true }
   ],
@@ -22,9 +24,8 @@
     "html_handling": "drop-trailing-slash",
     "not_found_handling": "404-page"
   },
-  "ai": {
-    "binding": "AI"
-  },
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "burn-rate-media" }],
+  "workflows": [{ "name": "burn-rate-round", "binding": "ROUNDS", "class_name": "RoundWorkflow" }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["signin@burnrateagents.com"] }],
   "d1_databases": [
     {
@@ -36,7 +37,7 @@
   "vars": {
     "PAYPAL_MODE": "sandbox",
     "EMAIL_FROM": "signin@burnrateagents.com",
-    "APP_ORIGIN": "https://burnrateagents.com",
+    "APP_ORIGIN": "https://burnrating.com",
     "GENERATION_ENABLED": "true",
     "GENERATION_DAILY_LIMIT": "20",
     "GENERATION_TOTAL_LIMIT": "50",
