@@ -1103,6 +1103,12 @@ export async function agentView(env: AppEnv, id: string) {
     .prepare("SELECT ts, type, amount_usd, note FROM wallet_ledger WHERE agent_id = ? ORDER BY ts DESC LIMIT 12")
     .bind(id)
     .all<{ ts: string; type: string; amount_usd: number; note: string | null }>();
+  const flow = await db
+    .prepare("SELECT ts, type, amount_usd FROM wallet_ledger WHERE agent_id = ? ORDER BY ts ASC, rowid ASC")
+    .bind(id)
+    .all<{ ts: string; type: string; amount_usd: number }>();
+  let running = 0;
+  const balanceHistory = flow.results.map((row) => ({ ts: row.ts, type: row.type, balance: cents((running += row.amount_usd)) }));
   const history = await db
     .prepare(
       `SELECT e.id AS entry_id, e.job_id, e.status AS entry_status, e.skip_reason, e.gen_label,
@@ -1166,6 +1172,7 @@ export async function agentView(env: AppEnv, id: string) {
     lanes,
     jobs: jobs.slice(0, 100),
     ledger: ledger.results.map((row) => ({ ...row, amount_usd: cents(row.amount_usd) })),
+    balanceHistory,
   };
 }
 

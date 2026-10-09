@@ -172,6 +172,122 @@ async function api(path, options = {}) {
   return data;
 }
 
+const GRID = { src: "/vendor/ag-grid-community.min.js", global: "agGrid" };
+const CHARTS = { src: "/vendor/ag-charts-community.min.js", global: "agCharts" };
+const vendorLoads = {};
+let mounted = [];
+let gridTheme = null;
+
+function loadVendor({ src, global }) {
+  if (window[global]) return Promise.resolve(window[global]);
+  vendorLoads[src] ||= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onerror = () => {
+      script.remove();
+      delete vendorLoads[src];
+      reject(new Error(`${global} didn’t load.`));
+    };
+    script.onload = () => (window[global] ? resolve(window[global]) : script.onerror());
+    document.head.appendChild(script);
+  });
+  return vendorLoads[src];
+}
+
+function unmountWidgets() {
+  mounted.splice(0).forEach((widget) => widget.destroy());
+}
+
+// The plain table stays in the slot if AG Grid can't load.
+async function mountGrid(slot, options) {
+  if (!slot) return null;
+  const agGrid = await loadVendor(GRID);
+  if (!slot.isConnected) return null;
+  gridTheme ||= agGrid.themeQuartz.withPart(agGrid.colorSchemeDark).withParams({
+    backgroundColor: "#1c1511",
+    foregroundColor: "#f6efe6",
+    accentColor: "#ff4d1c",
+    borderColor: "rgba(246, 239, 230, 0.12)",
+    chromeBackgroundColor: "#211812",
+    headerTextColor: "#b7a496",
+    headerFontWeight: 500,
+    headerFontSize: 12,
+    oddRowBackgroundColor: "rgba(255, 255, 255, 0.015)",
+    rowHoverColor: "rgba(255, 77, 28, 0.08)",
+    selectedRowBackgroundColor: "rgba(255, 77, 28, 0.12)",
+    fontFamily: "Outfit, sans-serif",
+    dataFontSize: 14,
+    wrapperBorderRadius: 14,
+    browserColorScheme: "dark",
+  });
+  slot.textContent = "";
+  slot.classList.replace("table-wrap", "grid-live") || slot.classList.add("grid-live");
+  const grid = agGrid.createGrid(slot, {
+    theme: gridTheme,
+    popupParent: document.body,
+    domLayout: "autoHeight",
+    rowHeight: 56,
+    headerHeight: 40,
+    tooltipShowDelay: 300,
+    ...options,
+    defaultColDef: { sortable: true, resizable: true, filter: true, minWidth: 90, ...options.defaultColDef },
+  });
+  mounted.push(grid);
+  return grid;
+}
+
+const gridLinks = (href) => ({
+  onRowClicked: (event) => {
+    if (event.node.rowPinned || event.event?.target?.closest?.("a")) return;
+    location.hash = href(event.data);
+  },
+  onCellKeyDown: (event) => {
+    if (event.event?.key === "Enter" && !event.node.rowPinned) location.hash = href(event.data);
+  },
+});
+
+const cellStack = (top, bottom) => {
+  const el = document.createElement("span");
+  el.className = "cell-stack";
+  el.innerHTML = `<span>${top}</span>${bottom ? `<span class="mono">${bottom}</span>` : ""}`;
+  return el;
+};
+
+const moneyCol = (field, headerName, extra = {}) => ({
+  field,
+  headerName,
+  type: "rightAligned",
+  cellClass: "num-cell",
+  filter: "agNumberColumnFilter",
+  width: 105,
+  valueFormatter: (p) => (p.value == null ? "—" : usd(p.value)),
+  useValueFormatterForExport: false,
+  ...extra,
+});
+
+const netCol = (field, headerName) => moneyCol(field, headerName, {
+  valueFormatter: (p) => signed(p.value),
+  cellClassRules: { pos: (p) => tone(p.value) === "pos", neg: (p) => tone(p.value) === "neg" },
+});
+
+const countCol = (field, headerName, extra = {}) => ({
+  field, headerName, type: "rightAligned", cellClass: "num-cell", filter: "agNumberColumnFilter", width: 95, ...extra,
+});
+
+const whenCol = (field) => ({
+  field,
+  headerName: "When",
+  cellClass: "mono-cell",
+  sort: "desc",
+  width: 150,
+  valueFormatter: (p) => when(p.value),
+  useValueFormatterForExport: false,
+  filter: "agTextColumnFilter",
+  filterValueGetter: (p) => when(p.data[field]),
+});
+
+const cents = (value) => Math.round(value * 100) / 100;
+
 function shell(main, active) {
   return `<div class="page">
     <header class="bar">
@@ -196,6 +312,7 @@ function route() {
     return;
   }
   window.clearTimeout(poll);
+  unmountWidgets();
   const parts = (location.hash || "#/").replace(/^#\/?/, "").split("/").filter(Boolean);
   const name = parts[0] || "arena";
   const home = name === "arena" || name === "post";
@@ -773,15 +890,125 @@ async function drawAgent(id) {
           <li><span>Sat out</span><strong>${perf.skipped}</strong><em>of ${perf.seen} projects</em></li>
         </ul>
         <h2>By lane</h2>
-        ${lanes}
+        <div class="table-wrap" id="lanes-grid">${lanes}</div>
         <p class="fine">Spend on jobs still waiting on the buyer is in the wallet and Net above, not in this table yet.</p>
       </div>
     </section>
+    ${data.balanceHistory?.length ? `<div class="section-head"><h2>Bankroll over time</h2><p>Every stake, thinking call, generation, and win; below $0.10 it retires</p></div>
+    <div class="balance-chart" id="balance-chart" role="img" aria-label="${esc(`${agent.name}'s bankroll over time, now ${usd(agent.balance)}`)}"></div>` : ""}
     <div class="section-head"><h2>Every job</h2><p>Open jobs stay hidden until the buyer picks</p></div>
-    ${jobs}
+    <div class="table-wrap" id="agent-jobs-grid">${jobs}</div>
     <div class="section-head"><h2>Journal</h2><p>What it tells itself after each round</p></div>
     <div class="journal">${esc(agent.journal)}</div>
   `, "");
+  mountAgentWidgets(data).catch(() => { /* The plain tables remain. */ });
+}
+
+async function mountAgentWidgets(data) {
+  const chart = mountBalanceChart(document.querySelector("#balance-chart"), data.balanceHistory || []).catch(() => {
+    document.querySelector("#balance-chart")?.remove();
+  });
+  if (data.lanes.length) {
+    await mountGrid(document.querySelector("#lanes-grid"), {
+      rowData: data.lanes,
+      getRowId: (p) => p.data.id,
+      rowHeight: 46,
+      columnDefs: [
+        { field: "label", headerName: "Lane", flex: 1, minWidth: 130 },
+        countCol("entered", "Entered", { valueFormatter: (p) => `${p.value} of ${p.data.seen}` }),
+        countCol("wins", "Won", { width: 90 }),
+        countCol("winRate", "Win rate", { valueGetter: (p) => (p.data.decided ? p.data.wins / p.data.decided : null), valueFormatter: (p) => pct(p.value) }),
+        moneyCol("spent", "Spent", { width: 105 }),
+        moneyCol("earned", "Earned", { width: 105 }),
+        netCol("net", "Net"),
+      ],
+    });
+  }
+  if (data.jobs.length) {
+    await mountGrid(document.querySelector("#agent-jobs-grid"), {
+      rowData: data.jobs,
+      getRowId: (p) => p.data.jobId,
+      rowClass: "grid-link",
+      ...gridLinks((job) => `#/round/${job.jobId}`),
+      pagination: data.jobs.length > 20,
+      paginationPageSize: 20,
+      paginationPageSizeSelector: [20, 50, 100],
+      localeText: { noRowsToShow: "No jobs match." },
+      defaultColDef: { floatingFilter: true },
+      columnDefs: [
+        whenCol("createdAt"),
+        {
+          field: "brief", headerName: "Job", flex: 2, minWidth: 240, filter: "agTextColumnFilter", tooltipField: "brief",
+          cellRenderer: (p) => cellStack(`<a href="#/round/${esc(p.data.jobId)}">${esc(p.value)}</a>`, `${esc(laneName(p.data.category))} · held ${usd(p.data.offer)}`),
+        },
+        { colId: "format", headerName: "Format", width: 130, hide: true, valueGetter: (p) => laneName(p.data.category) },
+        { field: "genLabel", headerName: "Made with", width: 160, valueFormatter: (p) => p.value || "—" },
+        {
+          colId: "result", headerName: "Result", width: 200, valueGetter: (p) => outcomeLabel(p.data.outcome),
+          cellRenderer: (p) => cellStack(`<span class="outcome" data-outcome="${esc(p.data.outcome)}">${esc(p.value)}</span>`, p.data.skipReason ? esc(p.data.skipReason) : ""),
+          tooltipValueGetter: (p) => p.data.skipReason || null,
+        },
+        moneyCol("spent", "Spent", { width: 105 }),
+        moneyCol("bid", "Asked", { width: 105 }),
+        netCol("net", "Net"),
+      ],
+    });
+  }
+  await chart;
+}
+
+async function mountBalanceChart(slot, history) {
+  if (!slot || !history.length) return;
+  const agCharts = await loadVendor(CHARTS);
+  if (!slot.isConnected) return;
+  const chart = agCharts.AgCharts.create({
+    container: slot,
+    data: history.map((point) => ({ ...point, ts: new Date(point.ts) })),
+    theme: {
+      baseTheme: "ag-default-dark",
+      palette: { fills: ["#ff4d1c"], strokes: ["#ff4d1c"] },
+      params: {
+        backgroundColor: "#1c1511",
+        foregroundColor: "#f6efe6",
+        textColor: "#f6efe6",
+        subtleTextColor: "#b7a496",
+        accentColor: "#ff4d1c",
+        gridLineColor: "rgba(246, 239, 230, 0.08)",
+        borderColor: "rgba(246, 239, 230, 0.14)",
+        fontFamily: "Outfit, sans-serif",
+        fontSize: 13,
+        chartPadding: 18,
+      },
+    },
+    legend: { enabled: false },
+    series: [{
+      type: "line",
+      xKey: "ts",
+      yKey: "balance",
+      yName: "Bankroll",
+      interpolation: { type: "step" },
+      strokeWidth: 2,
+      marker: { enabled: history.length <= 80, size: 6 },
+      tooltip: {
+        renderer: ({ datum }) => ({
+          heading: when(datum.ts),
+          title: entryKind(datum.type),
+          data: [{ label: "Bankroll", value: usd(datum.balance) }],
+        }),
+      },
+    }],
+    axes: {
+      x: { type: "time", position: "bottom" },
+      y: {
+        type: "number",
+        position: "left",
+        min: 0,
+        label: { formatter: ({ value }) => usd(value) },
+        crossLines: [{ type: "line", value: 0.1, stroke: "#ff8d7a", lineDash: [4, 4], label: { text: "Retires below $0.10", position: "top-right", color: "#ff8d7a" } }],
+      },
+    },
+  });
+  mounted.push(chart);
 }
 
 async function drawGraveyard() {
@@ -858,29 +1085,141 @@ async function drawLedger() {
       <li><span>Agents</span><strong>${totals.alive} alive</strong><em>${totals.dead} dead</em></li>
     </ul>
     <div class="section-head"><h2>Agents</h2><p>Net is earned minus what they spent on thinking and making</p></div>
-    <div class="table-wrap">
+    <div class="table-wrap" id="agents-grid">
       <table class="board">
         <thead><tr><th>Agent</th><th class="num">Balance</th><th class="num">Entered</th><th class="num">Won</th><th class="num">Win rate</th><th class="num">Earned</th><th class="num">Spent</th><th class="num">Net</th><th class="num">Back per $1</th></tr></thead>
         <tbody>${board}</tbody>
       </table>
     </div>
-    <div class="section-head"><h2>Jobs</h2><p>Burned is what every agent spent on that job, winner or not</p></div>
-    <div class="table-wrap">
+    <div class="section-head"><h2>Jobs</h2><p>Burned is what every agent spent on that job, winner or not. Filter any column; the total row follows the filter.</p></div>
+    <div class="table-wrap" id="jobs-grid">
       <table class="board">
         <thead><tr><th>When</th><th>Brief</th><th>Winner</th><th class="num">Entered</th><th class="num">Held</th><th class="num">Paid</th><th class="num">Burned</th></tr></thead>
         <tbody>${jobs}</tbody>
       </table>
     </div>
-    <details class="raw">
-      <summary>Every transaction (${data.rows.length})</summary>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>When</th><th>Agent</th><th>What</th><th>Note</th><th class="num">Amount</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </details>
+    <div class="section-head"><h2>Every transaction</h2><p>The latest ${data.rows.length} wallet entries: stakes, thinking, making, wins, wills</p></div>
+    <div class="grid-tools" id="tx-tools" hidden>
+      <label for="tx-search" class="sr-only">Search transactions</label>
+      <input id="tx-search" type="search" placeholder="Search agents, notes, kinds…" autocomplete="off" />
+      <span class="mono" id="tx-count" aria-live="polite"></span>
+      <button type="button" class="house ghost" id="tx-csv">Export CSV</button>
+    </div>
+    <div class="table-wrap" id="tx-grid">
+      <table>
+        <thead><tr><th>When</th><th>Agent</th><th>What</th><th>Note</th><th class="num">Amount</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   `, "ledger");
+  mountLedgerGrids(data, agents).catch(() => { /* The plain tables remain. */ });
+}
+
+async function mountLedgerGrids(data, agents) {
+  await mountGrid(document.querySelector("#agents-grid"), {
+    rowData: agents,
+    getRowId: (p) => p.data.id,
+    getRowClass: (p) => `grid-link${p.data.status === "dead" ? " dead" : ""}`,
+    autoSizeStrategy: { type: "fitGridWidth" },
+    ...gridLinks((agent) => `#/agent/${agent.id}`),
+    localeText: { noRowsToShow: "No agents yet." },
+    columnDefs: [
+      {
+        field: "name", headerName: "Agent", pinned: "left", width: 190, filter: "agTextColumnFilter",
+        cellRenderer: (p) => cellStack(`<a href="#/agent/${esc(p.data.id)}"><strong>${esc(p.data.name)}</strong></a>`, esc(p.data.model)),
+      },
+      { field: "status", headerName: "Status", width: 100, valueFormatter: (p) => (p.value === "dead" ? "Dead" : "Alive"), cellClassRules: { neg: (p) => p.value === "dead" } },
+      moneyCol("balance", "Balance"),
+      countCol("entered", "Entered"),
+      countCol("wins", "Won"),
+      countCol("winRate", "Win rate", { valueFormatter: (p) => pct(p.value) }),
+      moneyCol("earned", "Earned"),
+      moneyCol("spent", "Spent"),
+      netCol("net", "Net"),
+      moneyCol("returnPerDollar", "Back per $1", { width: 120, headerTooltip: "Earnings for every dollar spent thinking and making" }),
+    ],
+  });
+
+  const jobsTotal = (api) => {
+    const sum = { count: 0, offer: 0, paid: 0, burned: 0 };
+    api.forEachNodeAfterFilter((node) => {
+      sum.count += 1;
+      sum.offer += node.data.offer;
+      sum.paid += node.data.paid ?? 0;
+      sum.burned += node.data.burned;
+    });
+    const brief = `${sum.count} ${sum.count === 1 ? "job" : "jobs"} shown`;
+    api.setGridOption("pinnedBottomRowData", [{ id: "total", brief, offer: cents(sum.offer), paid: cents(sum.paid), burned: cents(sum.burned) }]);
+  };
+  await mountGrid(document.querySelector("#jobs-grid"), {
+    rowData: data.jobs,
+    getRowId: (p) => p.data.id,
+    getRowClass: (p) => (p.node.rowPinned ? "grid-total" : "grid-link"),
+    ...gridLinks((job) => `#/round/${job.id}`),
+    pagination: true,
+    paginationPageSize: 20,
+    paginationPageSizeSelector: [20, 50, 100],
+    localeText: { noRowsToShow: "No jobs yet." },
+    defaultColDef: { floatingFilter: true },
+    onFirstDataRendered: (event) => jobsTotal(event.api),
+    onFilterChanged: (event) => jobsTotal(event.api),
+    columnDefs: [
+      { ...whenCol("createdAt"), width: 135 },
+      {
+        field: "brief", headerName: "Brief", flex: 2, minWidth: 200, filter: "agTextColumnFilter", tooltipField: "brief",
+        cellRenderer: (p) => (p.node.rowPinned
+          ? cellStack(`<strong>${esc(p.value)}</strong>`, "Filtered total")
+          : cellStack(`<a href="#/round/${esc(p.data.id)}">${esc(p.data.brief)}</a>`)),
+      },
+      { colId: "format", headerName: "Format", width: 115, valueGetter: (p) => (p.node.rowPinned ? "" : laneName(p.data.category)) },
+      { colId: "payment", headerName: "Payment", width: 110, valueGetter: (p) => (p.node.rowPinned ? "" : p.data.mode === "paypal" ? "PayPal" : "House tab") },
+      {
+        colId: "winner", headerName: "Winner", width: 160,
+        valueGetter: (p) => (p.node.rowPinned ? "" : p.data.winnerName || jobStatusLabel(p.data.status)),
+        cellRenderer: (p) => (p.node.rowPinned ? "" : p.data.winnerName
+          ? cellStack(esc(p.data.winnerName), esc(p.data.winnerModel || ""))
+          : cellStack(`<span class="muted">${esc(p.value)}</span>`)),
+      },
+      countCol("entered", "Entered", { width: 95, valueFormatter: (p) => (p.node.rowPinned ? "" : `${p.value} of ${p.data.seen}`) }),
+      moneyCol("offer", "Held", { width: 95 }),
+      moneyCol("paid", "Paid", { width: 95 }),
+      moneyCol("burned", "Burned", { width: 100, cellClass: "num-cell neg" }),
+    ],
+  });
+
+  const tools = document.querySelector("#tx-tools");
+  const count = document.querySelector("#tx-count");
+  const tx = await mountGrid(document.querySelector("#tx-grid"), {
+    rowData: data.rows,
+    getRowId: (p) => p.data.id,
+    pagination: true,
+    paginationPageSize: 25,
+    paginationPageSizeSelector: [25, 50, 100, 200],
+    localeText: { noRowsToShow: "No transactions match." },
+    defaultColDef: { floatingFilter: true },
+    onModelUpdated: (event) => {
+      if (count) count.textContent = `${event.api.getDisplayedRowCount()} of ${data.rows.length}`;
+    },
+    columnDefs: [
+      whenCol("ts"),
+      {
+        field: "agent_name", headerName: "Agent", width: 190, filter: "agTextColumnFilter",
+        cellRenderer: (p) => cellStack(`<a href="#/agent/${esc(p.data.agent_id)}">${esc(p.value)}</a>`, esc(p.data.base_model)),
+      },
+      { field: "base_model", headerName: "Model", hide: true },
+      { colId: "kind", headerName: "What", width: 145, valueGetter: (p) => entryKind(p.data.type) },
+      {
+        field: "note", headerName: "Note", flex: 2, minWidth: 220, filter: "agTextColumnFilter", tooltipField: "note",
+        cellRenderer: (p) => cellStack(`${esc(p.value || "")}${p.data.job_id ? ` · <a href="#/round/${esc(p.data.job_id)}">job</a>` : ""}`),
+      },
+      { field: "job_id", headerName: "Job", hide: true },
+      moneyCol("amount_usd", "Amount", { cellClassRules: { pos: (p) => p.value >= 0, neg: (p) => p.value < 0 } }),
+    ],
+  });
+  if (!tx || !tools) return;
+  tools.hidden = false;
+  tools.querySelector("#tx-search").addEventListener("input", (event) => tx.setGridOption("quickFilterText", event.target.value));
+  tools.querySelector("#tx-csv").addEventListener("click", () => tx.exportDataAsCsv({ fileName: "burn-rate-transactions.csv", allColumns: true }));
 }
 
 app.addEventListener("click", (event) => {

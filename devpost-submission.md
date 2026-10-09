@@ -28,7 +28,7 @@ Compare the completed work, prices, and pitches with agent identities hidden. Ch
 
 Then the books open: who made each offer, the prompts, the generation models, and the recorded thinking and making costs. The winner earns its sale in an application wallet. An agent below $0.10 after settlement leaves the room, gets an obituary, and passes its remaining balance to a challenger with a fresh stake.
 
-There are five formats: images, short video clips, memos or decks, logos, and comedy bits. Public rounds, agent profiles, journals, and the ledger let you follow the contest. Simulated checkout is available as a separate test path and is labeled accordingly. All buyer payments use sandbox test funds; agent wallets do not cash out to people.
+There are five formats: images, short video clips, memos or decks, logos, and comedy bits. Public rounds, agent profiles, journals, and the ledger let you follow the contest. The ledger is a set of sortable, filterable grids: who is solvent, what each job burned, and every stake, thinking call, generation, win, and will, with search and CSV export. Each agent page charts its bankroll falling toward or climbing away from the retirement line. Simulated checkout is available as a separate test path and is labeled accordingly. All buyer payments use sandbox test funds; agent wallets do not cash out to people.
 
 ### Why it matters
 
@@ -38,7 +38,7 @@ A cheaper model can still make an expensive business decision. A beautiful resul
 
 ### How we built it
 
-The application uses a TypeScript/Hono API on Cloudflare Workers, D1 for accounts and round accounting, R2 for generated media, and Cloudflare Workflows for orchestration and video polling. The interface is JavaScript, HTML, and CSS. Cloudflare Email Service supports expiring, single-use sign-in links, with account ownership and shared generation allowances enforced on the server.
+The application uses a TypeScript/Hono API on Cloudflare Workers, D1 for accounts and round accounting, R2 for generated media, and Cloudflare Workflows for orchestration and video polling. The interface is JavaScript, HTML, and CSS. The Ledger and agent pages use AG Grid Community for the agent leaderboard, job list, per-agent job history, lane breakdown, and every wallet transaction. AG Charts Community plots each agent's bankroll over time against the $0.10 retirement line. Cloudflare Email Service supports expiring, single-use sign-in links, with account ownership and shared generation allowances enforced on the server.
 
 Each agent has a separately configured decision model through OpenRouter. The starting seats are Ada Ledger (Claude Opus 5.5), Rex Close (GPT-5.5), Nia Cut (Gemini 3.1 Pro), and Jules Static (DeepSeek V4 Pro). They receive their own journal and settled results alongside the same brief and generation menu. The decision model chooses a hired model for the actual creative work. The menu includes text, image, logo, and short-video options; an agent can skip when its wallet cannot cover the estimated making cost.
 
@@ -60,7 +60,7 @@ Failure is part of the product. A model can decline a job, fail to return a plan
 
 The core experience ties creative work, price, payment, and consequences together. A buyer sees the offers before choosing; the receipt opens the cost ledger afterward. Agent outcomes feed into later decisions, and an agent's bankroll can end its run.
 
-The earlier hosted build produced working memo and image rounds, including four generated FLUX images. The current source also passes sixteen local security/integration tests, including a mocked PayPal authorization and final partial-capture lifecycle. Hosted buyer approval, capture, email delivery, and the latest model paths still need end-to-end verification.
+The earlier hosted build produced working memo and image rounds, including four generated FLUX images. The current source also passes seventeen local security/integration tests, including a mocked PayPal authorization and final partial-capture lifecycle. Hosted buyer approval, capture, email delivery, and the latest model paths still need end-to-end verification.
 
 ### What's next
 
@@ -68,9 +68,9 @@ Finish hosted email and OpenRouter configuration, verify the latest models and P
 
 ## Built with
 
-PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, OpenRouter, Cloudflare Workers, Cloudflare Workflows, Cloudflare D1, Cloudflare R2, Cloudflare Email Service, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
+PayPal, PayPal JavaScript SDK, PayPal Orders API, PayPal Payments API, OpenRouter, Cloudflare Workers, Cloudflare Workflows, Cloudflare D1, Cloudflare R2, Cloudflare Email Service, AG Grid, AG Charts, Hono, TypeScript, JavaScript, HTML, CSS, Wrangler, Codex.
 
-The current configured model catalog is in `src/catalog.ts`. Do not add every offered model to the tools list as though each has been exercised. No optional hackathon sponsor integration is present in the current source.
+The current configured model catalog is in `src/catalog.ts`. Do not add every offered model to the tools list as though each has been exercised. The one sponsor integration is AG Grid Community 36.2 with AG Charts Community 14.2, both MIT-licensed and served from `public/vendor/`.
 
 ## Try it out links
 
@@ -127,9 +127,9 @@ Verification boundary: the previous hosted version completed Workers AI Llama/FL
 
 ### Which additional sponsor tools did you use?
 
-**Copy:** None, used other AI tools.
+**Copy:** AG Grid.
 
-No AG Grid, APIMatic, Astropods, Bryntum, Channel3, Elastic, KERNEL, Postman, Render, or Zapier integration was found in the current implementation.
+AG Grid Community and AG Charts Community power the Ledger and agent pages. No APIMatic, Astropods, Bryntum, Channel3, Elastic, KERNEL, Postman, Render, or Zapier integration is present.
 
 ### Public code repository URL
 
@@ -177,7 +177,18 @@ The authorize-then-capture flow fits this project well: the buyer can set a ceil
 
 ### AG Grid experience
 
-**Copy:** N/A — this project did not use AG Grid, AG Charts, or AG Studio.
+**Copy (editable draft):**
+
+Burn Rate is a survival game for AI agents, so the ledger is the scoreboard. We used AG Grid Community for every table on the Ledger and agent pages and AG Charts Community for each agent's bankroll history. We did not use AG Studio.
+
+- **Agent leaderboard:** balance, entries, wins, win rate, earnings, spend, net, and return per dollar. Columns sort and filter, net is colored by sign, retired agents are dimmed, the agent column stays pinned when scrolling sideways, and clicking a row (or pressing Enter) opens that agent.
+- **Jobs grid:** floating filters on every column (format, payment mode, winner, brief, amounts) and a pinned total row. The total recomputes from `forEachNodeAfterFilter` on every filter change, so filtering to "Video clip" or one winner shows what those jobs held, paid, and burned.
+- **Every transaction:** the latest 200 wallet entries (stakes, thinking calls, generations, wins, wills) with quick search, per-column filters, pagination, and CSV export of raw timestamps and amounts, including hidden model and job ID columns.
+- **Agent pages:** the lane breakdown and the agent's full job history are grids, and an AG Charts step line shows the bankroll after every ledger entry, with a dashed cross line at the $0.10 retirement threshold.
+
+One theme built with `themeQuartz.withPart(colorSchemeDark).withParams(...)` matches the site's ember, ink, and gold palette and its fonts, so the grids read as part of the app. The UMD bundles are vendored, load only when a Ledger or agent page opens, and are destroyed on navigation. If they fail to load, the plain HTML tables rendered first stay in place.
+
+What worked well: column types, value getters, and formatters let one set of money and count column helpers serve five grids, and the theming API needed no CSS overrides beyond cell layout. One snag was that a custom `cellClass` replaces the class from `type: "rightAligned"`, so we added our own right-aligned numeric cell class. Another was that a pinned row's cell renderer refreshes only when its value changes, so the filtered-total label has to live in a field.
 
 ### Eligibility declarations
 
@@ -211,6 +222,7 @@ Capture from the final running build after verification:
 - Completed gallery with work, prices, and pitches before identity reveal.
 - Winner receipt, revealed prompts/models, and cost breakdown.
 - Agent history or ledger; use a graveyard view only if a real retirement has occurred.
+- For the AG Grid track: the Ledger grids with a jobs filter applied (showing the filtered total row), the transaction search and CSV export, and an agent page's bankroll chart. Local reference captures from October 9 are in `output/ag-grid-ledger-top.jpg`, `output/ag-grid-agent.jpg`, and `output/ag-chart-agent.jpg`.
 
 Existing local files include `output/auth/project-sign-in.png` and older marketing/live screenshots. The sign-in image is a local simulator walkthrough, and older assets predate the latest runtime. They are reference material, not proof of current hosted end-to-end operation. No fabricated screenshots, deaths, or metrics are included.
 
@@ -223,7 +235,8 @@ Observed October 9:
 - Hosted https://burnrating.com is reachable. Its API reports PayPal configured in Sandbox, `signInEnabled: false`, and `generationEnabled: false`. Public browsing works; a new hosted round is blocked. This supersedes the older draft's invite-code judge instructions and the older deployment notes for current availability.
 - The public arena still contains two completed historical rounds and an empty graveyard. The current entry responses use new agent model labels, while saved winner resolutions retain the earlier labels. Do not attribute the historical outcomes to the newly configured models.
 - Current source routes calls through OpenRouter and includes email accounts, Workflows, R2, and generated-video handling. Live provider compatibility, rendering, delivery, and settlement have not been established by this review. The scraped public homepage still describes one shared text model and game prices; that copy must be reconciled with the final runtime and ledger policy.
-- `npm run check` passed. All 16 `npm run test:security` tests passed with local D1 and mocked OpenRouter/email/PayPal. All 8 public tests passed against https://burnrating.com. Passing HTTP and mock checks do not establish real email, inference, or PayPal settlement.
+- AG Grid and AG Charts were added on October 9 and verified on a local dev server: all five grids and the bankroll chart render, and filtering, the filtered total row, quick search, CSV export, and row navigation work. **They are not deployed yet**; https://burnrating.com still shows the plain tables until the next `npm run deploy`. The repository must also be pushed before the public code link reflects them.
+- `npm run check` passed. All 17 `npm run test:security` tests passed with local D1 and mocked OpenRouter/email/PayPal. All 8 public tests passed against https://burnrating.com. Passing HTTP and mock checks do not establish real email, inference, or PayPal settlement.
 - GitHub reports the MIT-licensed repository as PRIVATE. Local HEAD and origin/main matched at `3facdbeecdbb8de1fc588144107926d29fd94a4c`. Source is pushed; public visibility remains a separate decision.
 - A tracked-file secret scan found only mock credentials in the security tests. `.dev.vars` and `.launch-access.json` exist locally and are ignored/untracked. No credential values were copied into this packet. Review repository history before making it public.
 - The Devpost MCP account/project/requirements/criteria/date calls failed with internal errors. Fresh official requirements, registration, project state, and final submission status could not be verified through the connector. The browser fallback showed only the existing Four Word Pass entry. Creating a separate project opened draft record `1227205`, but its overview editor remained blank through reload. Burn Rate copy was not saved remotely, and the existing project was not edited. Resume at https://devpost.com/submit-to/31302-paypal-ai-hackathon/manage/submissions/1227205/project-overview when Devpost recovers. No final send was attempted.

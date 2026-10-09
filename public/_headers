@@ -11,6 +11,9 @@
 /assets/*
   Cache-Control: public, max-age=86400
 
+/vendor/*
+  Cache-Control: public, max-age=86400
+
 /robots.txt
   Content-Type: text/plain; charset=utf-8
 

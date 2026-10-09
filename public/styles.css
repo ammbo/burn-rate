@@ -422,6 +422,33 @@ td.num, th.num { text-align: right; font-family: "IBM Plex Mono", monospace; whi
 .outcome[data-outcome="won"] { color: var(--mint); border-color: rgba(182, 242, 196, 0.5); }
 .outcome[data-outcome="lost"] { color: var(--rose); border-color: rgba(255, 141, 122, 0.4); }
 .outcome[data-outcome="open"] { color: var(--gold); border-color: rgba(240, 194, 122, 0.4); }
+.grid-live { margin-top: 18px; }
+.grid-live .ag-cell { display: flex; align-items: center; }
+.grid-live .mono-cell, .grid-live .num-cell { font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+.grid-live .num-cell { justify-content: flex-end; }
+.grid-live .ag-cell.pos { color: var(--mint); }
+.grid-live .ag-cell.neg { color: var(--rose); }
+.grid-live .grid-link { cursor: pointer; }
+.grid-live .ag-row.dead { opacity: 0.6; }
+.grid-live .grid-total { font-weight: 600; background: #211812; }
+.grid-live a { color: var(--ink); text-decoration: none; }
+.grid-live a:hover { color: var(--gold); text-decoration: underline; }
+.cell-stack { display: flex; flex-direction: column; justify-content: center; min-width: 0; line-height: 1.35; }
+.cell-stack > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-stack .mono { font-size: 11px; }
+.grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.grid-tools input {
+  flex: 1 1 260px;
+  min-width: 0;
+  height: 42px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+}
+.grid-tools input:focus { outline: none; border-color: var(--gold); }
+.grid-tools .house { padding: 10px 16px; }
+.balance-chart { height: 300px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-2); }
 .raw { margin-top: 28px; }
 .raw summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 .profile h2 { margin: 0 0 8px; }
