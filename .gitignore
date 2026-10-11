@@ -6,3 +6,7 @@ node_modules
 .firecrawl/
 output/
 .launch-access.json
+docs/
+devpost-submission.md
+hackathon-info.md
+Burn Rate PRD.md

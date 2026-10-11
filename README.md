@@ -78,13 +78,13 @@ npm run deploy
 PUBLIC_TEST_ORIGIN=https://burnrating.com npm run test:public
 ```
 
-Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrating.com`. The `EMAIL` binding restricts sending to `signin@burnrating.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout. The October 9 account implementation has only been verified locally; see [account rollout](docs/account-sign-in.md).
+Before deploying, verify the Burn Rate sender domain is enabled and DNS is authenticated, set a random `AUTH_SECRET` as a Worker secret, and confirm `APP_ORIGIN=https://burnrating.com`. The `EMAIL` binding restricts sending to `signin@burnrating.com`; it needs no Resend API key. Missing email configuration fails closed for new generation. Test actual delivery to an address you control after rollout.
 
 Local email is simulated and saved to files whose paths Wrangler prints. It does not deliver messages unless a remote email binding is explicitly enabled. When using another development port, set `APP_ORIGIN` to that origin as well.
 
 Keep `PAYPAL_MODE=sandbox` for this hackathon. Set `OPENROUTER_API_KEY` in `.dev.vars` locally and as a Worker secret in production; without it, new generation is disabled.
 
-Schema changes are applied on the first API request and tracked in `app_meta`. The daily 05:17 UTC cleanup removes eligible briefs and outputs after 30 days, expired sessions/sign-in links, email-send reservations older than 24 hours, and old access-attempt counters. Account emails remain until operator removal. Unsettled authorized PayPal records, historical game accounting, and agent journals remain. Old generation allowance records lose account/IP references after seven days but remain for the total cap. See [launch operations](docs/launch-operations.md) for removal and verification boundaries.
+Schema changes are applied on the first API request and tracked in `app_meta`. The daily 05:17 UTC cleanup removes eligible briefs and outputs after 30 days, expired sessions/sign-in links, email-send reservations older than 24 hours, and old access-attempt counters. Account emails remain until operator removal. Unsettled authorized PayPal records, historical game accounting, and agent journals remain. Old generation allowance records lose account/IP references after seven days but remain for the total cap.
 
 ## AI
 
@@ -121,7 +121,7 @@ Public copy and metadata live in `scripts/build-public.mjs`. Edit that file, the
 
 Each public page has its own title, description, canonical URL, Open Graph and Twitter card tags, and JSON-LD. The homepage has readable static content when JavaScript or the API is unavailable. Interactive hash views share the homepage URL and social card; they are not independent indexable pages and are excluded from the sitemap. The Worker redirects HTTP, `www.burnrating.com`, and both `burnrateagents.com` hostnames to `https://burnrating.com`, preserving paths and queries, and serves real 404 responses for missing paths. APIs send `no-store` and `noindex` headers.
 
-Brand assets are in `public/assets`: the SVG flame mark and wordmark, a transparent PNG wordmark, browser icons, and the 1200×630 PNG social card. The original generated social image and its prompt are included; see `docs/brand-assets.md`. The SVG wordmark uses a system serif fallback; the website wordmark uses the existing Fraunces font.
+Brand assets are in `public/assets`: the SVG flame mark and wordmark, a transparent PNG wordmark, browser icons, and the 1200×630 PNG social card. The SVG wordmark uses a system serif fallback; the website wordmark uses the existing Fraunces font.
 
 Verify locally with a running development server:
 
@@ -133,4 +133,4 @@ npm run dev -- --local --port 8791 --inspector-port 9241 --var APP_ORIGIN:http:/
 PUBLIC_TEST_ORIGIN=http://localhost:8791 npm run test:public
 ```
 
-The checks cover public metadata, discovery files, real GET/HEAD 404s, HTML redirects, API headers, and the PayPal SDK loader. They do not authorize or capture a payment. `npm run deploy` rebuilds public documents first; after deploying, repeat the HTTP checks with `PUBLIC_TEST_ORIGIN=https://burnrating.com` and inspect the social preview. See `docs/launch-checklist.md` for remaining launch work.
+The checks cover public metadata, discovery files, real GET/HEAD 404s, HTML redirects, API headers, and the PayPal SDK loader. They do not authorize or capture a payment. `npm run deploy` rebuilds public documents first; after deploying, repeat the HTTP checks with `PUBLIC_TEST_ORIGIN=https://burnrating.com` and inspect the social preview.
